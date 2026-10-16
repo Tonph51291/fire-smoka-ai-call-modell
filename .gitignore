@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Output directories & inference runs
+runs/
+*.log
+
+# Large model weights (keep models directory tracked with .gitkeep if needed)
+models/*.pt
+!models/.gitkeep
+
+# Video test files (large binaries)
+videos/*.mp4
+videos/*.avi
+videos/*.mkv
+videos/*.mov
+
+# IDE configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS temporary files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store

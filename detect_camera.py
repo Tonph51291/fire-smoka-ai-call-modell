@@ -3,7 +3,7 @@ import cv2
 from pathlib import Path
 from ultralytics import YOLO
 
-MODEL_PATH = "models/fire_smoke_best.pt"
+MODEL_PATH = "models/best.pt"
 CONF_THRESHOLD = 0.25
 
 # Kiểm tra model
