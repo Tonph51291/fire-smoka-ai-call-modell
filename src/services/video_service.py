@@ -9,6 +9,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 import cv2
 import numpy as np
 
+from src.config import FRAME_STRIDE
 from src.services.detection_service import DetectionService, FrameAnalysisResult
 from src.utils.video_utils import format_timestamp, get_video_metadata
 
@@ -29,8 +30,13 @@ class VideoService:
     2. Inference Thread: Asynchronously runs YOLO detection on the newest available frame.
     """
 
-    def __init__(self, detection_service: Optional[DetectionService] = None) -> None:
+    def __init__(
+        self,
+        detection_service: Optional[DetectionService] = None,
+        frame_stride: int = FRAME_STRIDE
+    ) -> None:
         self.detection_service = detection_service
+        self.frame_stride = max(1, frame_stride)
         self.video_path: Optional[Path] = None
         self.cap: Optional[cv2.VideoCapture] = None
         self.state: PlaybackState = PlaybackState.STOPPED
@@ -191,6 +197,9 @@ class VideoService:
             self._latest_inference = None
             self._last_inferred_idx = -1
 
+        if self.detection_service and hasattr(self.detection_service, "reset_tracking"):
+            self.detection_service.reset_tracking()
+
         self._set_state(PlaybackState.STOPPED)
 
     def seek_frame(self, target_frame_idx: int) -> None:
@@ -210,9 +219,11 @@ class VideoService:
                         self._latest_frame_idx = self.current_frame_idx
                         self._latest_frame_ts = self.current_timestamp_sec
 
-                # Reset clock base
+                # Reset clock base and tracking history
                 self._play_start_mono = time.monotonic()
                 self._play_start_video_sec = self.current_timestamp_sec
+                if self.detection_service and hasattr(self.detection_service, "reset_tracking"):
+                    self.detection_service.reset_tracking()
 
     def get_latest_data(self) -> Tuple[Optional[np.ndarray], int, float, Optional[FrameAnalysisResult]]:
         """Non-blocking retrieval of latest frame and newest AI results for UI rendering."""
@@ -364,6 +375,11 @@ class VideoService:
                 ts_to_process = self._latest_frame_ts
 
             if frame_to_process is None or idx_to_process == self._last_inferred_idx:
+                time.sleep(0.01)
+                continue
+
+            # Chỉ xử lý 1 trên N frame (FRAME_STRIDE)
+            if self._last_inferred_idx >= 0 and (idx_to_process - self._last_inferred_idx) < self.frame_stride:
                 time.sleep(0.01)
                 continue
 

@@ -1,104 +1,163 @@
+"""Phát hiện lửa và khói theo thời gian thực từ Webcam / RTSP sử dụng pipeline AI Gộp (best.pt + fire_yolo.pt)."""
 
-import cv2
+import argparse
+import sys
+import time
 from pathlib import Path
-from ultralytics import YOLO
+import cv2
 
-MODEL_PATH = "models/best.pt"
-CONF_THRESHOLD = 0.25
+# Thêm đường dẫn project
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-# Kiểm tra model
-if not Path(MODEL_PATH).exists():
-    raise FileNotFoundError(f"Không tìm thấy model: {MODEL_PATH}")
+# Đảm bảo in ký tự Unicode/Emoji mượt mà trên console Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# Nạp model AI
-print("Đang tải model AI...")
-model = YOLO(MODEL_PATH)
+from src.config import (
+    CV_COLORS,
+    DEFAULT_CAMERA_SOURCE,
+    DEFAULT_CONF_THRESHOLD,
+    FRAME_STRIDE,
+    MODEL_CU_PATH,
+    MODEL_MOI_PATH,
+    STATE_BOTH,
+    STATE_FIRE,
+    STATE_SMOKE,
+    TEN_KHOI,
+    TEN_LUA,
+)
+from src.services.detection_service import DetectionService
 
-# Mở webcam mặc định
-camera = cv2.VideoCapture(0)
 
-if not camera.isOpened():
-    raise RuntimeError(
-        "Không mở được camera. Hãy kiểm tra quyền camera "
-        "hoặc thử đổi VideoCapture(0) thành VideoCapture(1)."
-    )
+def run_camera(camera_source=DEFAULT_CAMERA_SOURCE, conf_thresh: float = DEFAULT_CONF_THRESHOLD) -> None:
+    print("=" * 65)
+    print("🎥 AI FIRE & SMOKE DETECTION - REAL-TIME CAMERA")
+    print(f"   Nguồn Camera: {camera_source}")
+    print(f"   Model Cũ: {MODEL_CU_PATH.name} | Model Mới: {MODEL_MOI_PATH.name}")
+    print(f"   Ngưỡng confidence: {conf_thresh:.1%}")
+    print("=" * 65)
 
-print("Camera đã mở. Nhấn Q để thoát.")
+    service = DetectionService(conf_threshold=conf_thresh)
 
-try:
-    while True:
-        # Đọc một khung hình từ camera
-        success, frame = camera.read()
+    # Chuyển đổi camera source nếu là chuỗi số
+    if isinstance(camera_source, str) and camera_source.isdigit():
+        camera_source = int(camera_source)
 
-        if not success:
-            print("Không đọc được hình ảnh từ camera.")
-            break
+    camera = cv2.VideoCapture(camera_source)
+    if not camera.isOpened():
+        print(f"[!] Không mở được camera tại nguồn: {camera_source}")
+        sys.exit(1)
 
-        # Đưa khung hình vào model AI
-        results = model.predict(
-            source=frame,
-            imgsz=640,
-            conf=CONF_THRESHOLD,
-            verbose=False
-        )
+    print("\n[+] Camera đã kết nối. Nhấn 'q' để thoát.\n")
 
-        detected_fire = False
-        detected_smoke = False
+    frame_idx = 0
+    fps_timer = time.time()
+    fps_counter = 0
+    current_fps = 0.0
 
-        # Vẽ khung nhận diện lên hình ảnh
-        result = results[0]
-        display_frame = result.plot()
+    last_analysis = None
 
-        # Kiểm tra các đối tượng được phát hiện
-        for box in result.boxes:
-            class_id = int(box.cls[0])
-            confidence = float(box.conf[0])
-            label = str(result.names[class_id]).lower()
+    try:
+        while True:
+            success, frame = camera.read()
+            if not success or frame is None:
+                print("[!] Mất tín hiệu hình ảnh từ camera.")
+                break
 
-            if label == "fire":
-                detected_fire = True
-            elif label == "smoke":
-                detected_smoke = True
+            frame_idx += 1
+            fps_counter += 1
+            now = time.time()
+            if now - fps_timer >= 1.0:
+                current_fps = fps_counter / (now - fps_timer)
+                fps_counter = 0
+                fps_timer = now
 
-            print(
-                f"\rPhát hiện: {label} | "
-                f"Độ tin cậy: {confidence:.2%}    ",
-                end=""
+            # Chạy AI theo FRAME_STRIDE
+            if frame_idx % FRAME_STRIDE == 0 or last_analysis is None:
+                last_analysis = service.detect_frame(
+                    frame=frame,
+                    frame_index=frame_idx,
+                    timestamp_sec=frame_idx / 25.0
+                )
+
+            display_frame = frame.copy()
+
+            # Vẽ bounding boxes
+            if last_analysis and last_analysis.detections:
+                for det in last_analysis.detections:
+                    cname_lower = det.class_name.lower()
+                    x1, y1, x2, y2 = det.bbox
+
+                    source_tag = {"gop": "GỘP", "moi": "Mới", "cu": "Cũ"}.get(det.model_source, det.model_source)
+                    if cname_lower in TEN_LUA:
+                        color = CV_COLORS["fire"]
+                        label = f"LUA [{source_tag}]: {det.confidence:.1%}"
+                    elif cname_lower in TEN_KHOI:
+                        color = CV_COLORS["smoke"]
+                        label = f"KHOI [{source_tag}]: {det.confidence:.1%}"
+                    else:
+                        color = CV_COLORS["default"]
+                        label = f"{det.class_name.upper()} [{source_tag}]: {det.confidence:.1%}"
+
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(display_frame, (x1, max(0, y1 - th - 6)), (x1 + tw + 6, y1), color, -1)
+                    cv2.putText(
+                        display_frame,
+                        label,
+                        (x1 + 3, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA
+                    )
+
+            # Vẽ thanh trạng thái cảnh báo phía trên
+            state = last_analysis.alert_state if last_analysis else "NORMAL"
+            if state == STATE_BOTH:
+                msg = f"CANH BAO: PHAT HIEN LUA VA KHOI! (FPS: {current_fps:.1f})"
+                bar_color = (0, 0, 200)
+            elif state == STATE_FIRE:
+                msg = f"CANH BAO: PHAT HIEN LUA! (FPS: {current_fps:.1f})"
+                bar_color = (0, 0, 255)
+            elif state == STATE_SMOKE:
+                msg = f"CANH BAO: PHAT HIEN KHOI! (FPS: {current_fps:.1f})"
+                bar_color = (0, 140, 255)
+            else:
+                msg = f"He thong an toan - Khong co lua/khoi (FPS: {current_fps:.1f})"
+                bar_color = (30, 180, 50)
+
+            # Vẽ banner cảnh báo trên đầu khung hình
+            cv2.rectangle(display_frame, (0, 0), (display_frame.shape[1], 45), bar_color, -1)
+            cv2.putText(
+                display_frame,
+                msg,
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA
             )
 
-        # Hiển thị cảnh báo trên màn hình
-        if detected_fire and detected_smoke:
-            message = "CANH BAO: PHAT HIEN LUA VA KHOI!"
-            color = (0, 0, 255)
-        elif detected_fire:
-            message = "CANH BAO: PHAT HIEN LUA!"
-            color = (0, 0, 255)
-        elif detected_smoke:
-            message = "CANH BAO: PHAT HIEN KHOI!"
-            color = (0, 165, 255)
-        else:
-            message = "Chua phat hien lua hoac khoi"
-            color = (0, 200, 0)
+            cv2.imshow("AI Fire & Smoke Detection (Dual-Model)", display_frame)
 
-        cv2.putText(
-            display_frame,
-            message,
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            color,
-            2,
-            cv2.LINE_AA
-        )
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
 
-        # Hiển thị webcam
-        cv2.imshow("AI Fire and Smoke Detection", display_frame)
+    finally:
+        camera.release()
+        cv2.destroyAllWindows()
+        print("\n[+] Đã đóng camera an toàn.")
 
-        # Nhấn Q để thoát
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
 
-finally:
-    camera.release()
-    cv2.destroyAllWindows()
-    print("\nĐã đóng camera.")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Camera giám sát phát hiện cháy/khói thời gian thực")
+    parser.add_argument("--source", default=str(DEFAULT_CAMERA_SOURCE), help="Chỉ số webcam (0, 1) hoặc đường dẫn RTSP")
+    parser.add_argument("--conf", type=float, default=DEFAULT_CONF_THRESHOLD, help="Ngưỡng confidence (0.0 - 1.0)")
+    args = parser.parse_args()
+
+    run_camera(camera_source=args.source, conf_thresh=args.conf)
