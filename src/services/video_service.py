@@ -1,4 +1,7 @@
-"""Video processing service with decoupled playback and inference threads."""
+"""Dịch vụ phát video và xử lý khung hình đa luồng (Video Processing Service).
+Tách biệt luồng phát mượt mà (Playback Worker) và luồng suy luận AI (Inference Worker)
+nhằm tối ưu hóa hiệu năng CPU và không gây đơ giao diện người dùng.
+"""
 
 import logging
 import threading
@@ -11,7 +14,7 @@ import numpy as np
 
 from src.config import FRAME_STRIDE
 from src.services.detection_service import DetectionService, FrameAnalysisResult
-from src.utils.video_utils import format_timestamp, get_video_metadata
+from src.utils.video_utils import get_video_metadata
 
 logger = logging.getLogger(__name__)
 

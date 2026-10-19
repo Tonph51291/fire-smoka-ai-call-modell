@@ -1,4 +1,7 @@
-"""Main Application Window with Tkinter, Canvas, and Pillow."""
+"""Giao diện người dùng Tkinter cho ứng dụng AI Phát Hiện Lửa & Khói.
+Hiển thị khung hình letterbox, bounding box cảnh báo, thanh điều khiển video,
+thanh trượt độ nhạy và bảng chỉ số phân tích trực tiếp.
+"""
 
 import logging
 import time

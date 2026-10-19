@@ -1,4 +1,6 @@
-"""Entry point for the AI Fire & Smoke Detection Application."""
+"""Điểm khởi chạy chính của ứng dụng AI Phát Hiện Lửa & Khói (Desktop Tkinter GUI).
+Khởi tạo giao diện, kết nối VideoService và DetectionService, xử lý sự kiện đóng ứng dụng.
+"""
 
 import logging
 import sys

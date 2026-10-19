@@ -1,4 +1,6 @@
-"""Video utility functions for Fire & Smoke AI application."""
+"""Các hàm tiện ích xử lý video, hình ảnh và bounding box.
+Bao gồm tính toán IoU, định dạng thời gian, letterbox canvas và chuyển đổi BGR sang RGB.
+"""
 
 from pathlib import Path
 from typing import Dict, Tuple, Union
@@ -108,3 +110,18 @@ def bgr_to_pil(frame: np.ndarray) -> Image.Image:
     """Convert an OpenCV BGR image to a PIL RGB Image."""
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     return Image.fromarray(rgb)
+
+
+def compute_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
+    """Tính Intersection-over-Union (IoU) giữa 2 bounding box (x1, y1, x2, y2)."""
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter == 0:
+        return 0.0
+    area1 = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
+    area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
+    union = area1 + area2 - inter
+    return (inter / union) if union > 0 else 0.0
