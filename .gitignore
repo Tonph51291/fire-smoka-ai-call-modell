@@ -14,7 +14,6 @@ runs/
 *.log
 
 # Large model weights (keep models directory tracked with .gitkeep if needed)
-models/*.pt
 !models/.gitkeep
 
 # Video test files (large binaries)
