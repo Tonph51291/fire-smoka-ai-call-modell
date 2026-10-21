@@ -1,0 +1,659 @@
+BAO CAO KIEM TRA MODEL FIRE & SMOKE AI
+Report file: D:\tecnix\fire-smoke-ai\model_report.txt
+Luu y: checkpoint co the khong luu day du lich su huan luyen.
+
+=================================================================
+MODEL: fire_yolo.pt
+=================================================================
+
+[THONG TIN CHUNG]
+Task: detect
+Classes: {"0": "fire", "1": "smoke"}
+Ultralytics version: 8.4.104
+Checkpoint keys: ['date', 'version', 'license', 'docs', 'epoch', 'best_fitness', 'model', 'ema', 'updates', 'optimizer', 'scaler', 'train_args', 'train_metrics', 'train_results', 'git']
+
+[CAU HINH KIEN TRUC]
+{
+  "nc": 2,
+  "end2end": true,
+  "reg_max": 1,
+  "scales": {
+    "n": [
+      0.5,
+      0.25,
+      1024
+    ],
+    "s": [
+      0.5,
+      0.5,
+      1024
+    ],
+    "m": [
+      0.5,
+      1.0,
+      512
+    ],
+    "l": [
+      1.0,
+      1.0,
+      512
+    ],
+    "x": [
+      1.0,
+      1.5,
+      512
+    ]
+  },
+  "backbone": [
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        64,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        128,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        256,
+        false,
+        0.25
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        256,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        false,
+        0.25
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        512,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        1024,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        1024,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "SPPF",
+      [
+        1024,
+        5,
+        3,
+        true
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C2PSA",
+      [
+        1024
+      ]
+    ]
+  ],
+  "head": [
+    [
+      -1,
+      1,
+      "nn.Upsample",
+      [
+        "None",
+        2,
+        "nearest"
+      ]
+    ],
+    [
+      [
+        -1,
+        6
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "nn.Upsample",
+      [
+        "None",
+        2,
+        "nearest"
+      ]
+    ],
+    [
+      [
+        -1,
+        4
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        256,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        256,
+        3,
+        2
+      ]
+    ],
+    [
+      [
+        -1,
+        13
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        512,
+        3,
+        2
+      ]
+    ],
+    [
+      [
+        -1,
+        10
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      1,
+      "C3k2",
+      [
+        1024,
+        true,
+        0.5,
+        true
+      ]
+    ],
+    [
+      [
+        16,
+        19,
+        22
+      ],
+      1,
+      "Detect",
+      [
+        "nc"
+      ]
+    ]
+  ],
+  "scale": "n",
+  "yaml_file": "yolo26n.yaml",
+  "channels": 3
+}
+
+[THONG TIN HUAN LUYEN]
+epoch: -1
+train_args: {'task': 'detect', 'mode': 'train', 'model': 'yolo26n.pt', 'data': '/content/FASDD_CV-3/data.yaml', 'epochs': 100, 'time': None, 'patience': 30, 'batch': 256, 'imgsz': 640, 'save': True, 'save_period': -1, 'cache': False, 'device': '', 'workers': 12, 'project': '/content/output', 'name': 'fire_smoke_box_fresh', 'exist_ok': False, 'pretrained': True, 'cls_remap': True, 'optimizer': 'auto', 'verbose': True, 'seed': 0, 'deterministic': True, 'single_cls': False, 'rect': False, 'cos_lr': False, 'close_mosaic': 10, 'resume': False, 'amp': True, 'fraction': 1.0, 'profile': False, 'freeze': None, 'multi_scale': 0.0, 'compile': False, 'overlap_mask': True, 'mask_ratio': 4, 'dropout': 0.0, 'val': True, 'split': 'val', 'save_json': False, 'conf': None, 'iou': 0.7, 'max_det': 300, 'quantize': None, 'dnn': False, 'plots': True, 'end2end': None, 'source': None, 'vid_stride': 1, 'stream_buffer': False, 'visualize': False, 'augment': False, 'agnostic_nms': False, 'classes': None, 'retina_masks': False, 'embed': None, 'show': False, 'save_frames': False, 'save_txt': False, 'save_conf': False, 'save_crop': False, 'show_labels': True, 'show_conf': True, 'show_boxes': True, 'line_width': None, 'format': 'torchscript', 'keras': False, 'optimize': False, 'dynamic': False, 'simplify': True, 'opset': None, 'workspace': None, 'nms': False, 'lr0': 0.01, 'lrf': 0.01, 'momentum': 0.937, 'weight_decay': 0.0005, 'warmup_epochs': 3.0, 'warmup_momentum': 0.8, 'warmup_bias_lr': 0.0, 'distill_model': None, 'dis': 6.0, 'box': 7.5, 'cls': 0.5, 'cls_pw': 0.0, 'dfl': 1.5, 'pose': 12.0, 'kobj': 1.0, 'rle': 1.0, 'angle': 1.0, 'dlog': 1.0, 'dgrad': 0.5, 'dlam': 1.0, 'nbs': 64, 'hsv_h': 0.015, 'hsv_s': 0.7, 'hsv_v': 0.4, 'degrees': 0.0, 'translate': 0.1, 'scale': 0.5, 'shear': 0.0, 'perspective': 0.0, 'flipud': 0.0, 'fliplr': 0.5, 'bgr': 0.0, 'mosaic': 1.0, 'mixup': 0.0, 'cutmix': 0.0, 'copy_paste': 0.0, 'copy_paste_mode': 'flip', 'auto_augment': 'randaugment', 'erasing': 0.4, 'cfg': None, 'tracker': 'tracktrack.yaml'}
+train_metrics: {'metrics/precision(B)': 0.78604, 'metrics/recall(B)': 0.67139, 'metrics/mAP50(B)': 0.77204, 'metrics/mAP50-95(B)': 0.52731, 'val/box_loss': 1.21195, 'val/cls_loss': 1.02987, 'val/l1_loss': 0.01393, 'fitness': 0.52731}
+date: 2026-07-22T09:41:01.456446
+
+[THONG KE LAYER]
+Layer 0: Conv, params=464, from=-1
+Layer 1: Conv, params=4,672, from=-1
+Layer 2: C3k2, params=6,640, from=-1
+Layer 3: Conv, params=36,992, from=-1
+Layer 4: C3k2, params=26,080, from=-1
+Layer 5: Conv, params=147,712, from=-1
+Layer 6: C3k2, params=87,040, from=-1
+Layer 7: Conv, params=295,424, from=-1
+Layer 8: C3k2, params=346,112, from=-1
+Layer 9: SPPF, params=164,608, from=-1
+Layer 10: C2PSA, params=249,728, from=-1
+Layer 11: Upsample, params=0, from=-1
+Layer 12: Concat, params=0, from=[-1, 6]
+Layer 13: C3k2, params=119,808, from=-1
+Layer 14: Upsample, params=0, from=-1
+Layer 15: Concat, params=0, from=[-1, 4]
+Layer 16: C3k2, params=34,304, from=-1
+Layer 17: Conv, params=36,992, from=-1
+Layer 18: Concat, params=0, from=[-1, 13]
+Layer 19: C3k2, params=95,232, from=-1
+Layer 20: Conv, params=147,712, from=-1
+Layer 21: Concat, params=0, from=[-1, 10]
+Layer 22: C3k2, params=463,104, from=-1
+Layer 23: Detect, params=241,956, from=[16, 19, 22]
+
+Tong parameters: 2,504,580
+
+[MODEL SUMMARY]
+
+=================================================================
+MODEL: best.pt
+=================================================================
+
+[THONG TIN CHUNG]
+Task: detect
+Classes: {"0": "Fire", "1": "Smoke"}
+Ultralytics version: 8.4.130
+Checkpoint keys: ['date', 'version', 'license', 'docs', 'epoch', 'best_fitness', 'model', 'ema', 'updates', 'optimizer', 'scaler', 'train_args', 'train_metrics', 'train_results', 'git']
+
+[CAU HINH KIEN TRUC]
+{
+  "nc": 2,
+  "end2end": true,
+  "reg_max": 1,
+  "scales": {
+    "n": [
+      0.5,
+      0.25,
+      1024
+    ],
+    "s": [
+      0.5,
+      0.5,
+      1024
+    ],
+    "m": [
+      0.5,
+      1.0,
+      512
+    ],
+    "l": [
+      1.0,
+      1.0,
+      512
+    ],
+    "x": [
+      1.0,
+      1.5,
+      512
+    ]
+  },
+  "backbone": [
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        64,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        128,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        256,
+        false,
+        0.25
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        256,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        false,
+        0.25
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        512,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        1024,
+        3,
+        2
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        1024,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "SPPF",
+      [
+        1024,
+        5,
+        3,
+        true
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C2PSA",
+      [
+        1024
+      ]
+    ]
+  ],
+  "head": [
+    [
+      -1,
+      1,
+      "nn.Upsample",
+      [
+        "None",
+        2,
+        "nearest"
+      ]
+    ],
+    [
+      [
+        -1,
+        6
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "nn.Upsample",
+      [
+        "None",
+        2,
+        "nearest"
+      ]
+    ],
+    [
+      [
+        -1,
+        4
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        256,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        256,
+        3,
+        2
+      ]
+    ],
+    [
+      [
+        -1,
+        13
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      2,
+      "C3k2",
+      [
+        512,
+        true
+      ]
+    ],
+    [
+      -1,
+      1,
+      "Conv",
+      [
+        512,
+        3,
+        2
+      ]
+    ],
+    [
+      [
+        -1,
+        10
+      ],
+      1,
+      "Concat",
+      [
+        1
+      ]
+    ],
+    [
+      -1,
+      1,
+      "C3k2",
+      [
+        1024,
+        true,
+        0.5,
+        true
+      ]
+    ],
+    [
+      [
+        16,
+        19,
+        22
+      ],
+      1,
+      "Detect",
+      [
+        "nc"
+      ]
+    ]
+  ],
+  "scale": "s",
+  "yaml_file": "yolo26s.yaml",
+  "channels": 3
+}
+
+[THONG TIN HUAN LUYEN]
+epoch: -1
+train_args: {'task': 'detect', 'mode': 'train', 'model': '/root/.cache/huggingface/hub/models--SalahALHaismawi--yolov26-fire-detection/snapshots/5397b43994c39c2ed4ef81a6996c6334e2b7a5fa/best.pt', 'data': '/content/Fire-Detection-1/data.yaml', 'epochs': 100, 'time': None, 'patience': 20, 'batch': 16, 'imgsz': 640, 'save': True, 'save_period': -1, 'cache': False, 'device': '0', 'workers': 8, 'project': 'fire_finetune', 'name': 'run1', 'exist_ok': True, 'pretrained': True, 'cls_remap': True, 'optimizer': 'AdamW', 'verbose': True, 'seed': 0, 'deterministic': True, 'single_cls': False, 'rect': False, 'cos_lr': False, 'close_mosaic': 10, 'resume': False, 'amp': True, 'fraction': 1.0, 'profile': False, 'freeze': None, 'multi_scale': 0.0, 'compile': False, 'channels_last': False, 'overlap_mask': True, 'mask_ratio': 4, 'dropout': 0.0, 'val': True, 'split': 'val', 'save_json': False, 'conf': None, 'iou': 0.7, 'max_det': 300, 'quantize': None, 'dnn': False, 'plots': True, 'end2end': None, 'source': None, 'vid_stride': 1, 'stream_buffer': False, 'visualize': False, 'augment': False, 'agnostic_nms': False, 'classes': None, 'retina_masks': False, 'embed': None, 'show': False, 'save_frames': False, 'save_txt': False, 'save_conf': False, 'save_crop': False, 'show_labels': True, 'show_conf': True, 'show_boxes': True, 'line_width': None, 'format': 'torchscript', 'keras': False, 'optimize': False, 'dynamic': False, 'simplify': True, 'opset': None, 'workspace': None, 'nms': False, 'lr0': 0.001, 'lrf': 0.01, 'momentum': 0.937, 'weight_decay': 0.0005, 'warmup_epochs': 3.0, 'warmup_momentum': 0.8, 'warmup_bias_lr': 0.1, 'distill_model': None, 'dis': 6.0, 'box': 7.5, 'cls': 0.5, 'cls_pw': 0.0, 'dfl': 1.5, 'pose': 12.0, 'kobj': 1.0, 'rle': 1.0, 'angle': 1.0, 'dlog': 1.0, 'dgrad': 0.5, 'dlam': 1.0, 'nbs': 64, 'hsv_h': 0.015, 'hsv_s': 0.7, 'hsv_v': 0.4, 'degrees': 0.0, 'translate': 0.1, 'scale': 0.5, 'shear': 0.0, 'perspective': 0.0, 'flipud': 0.0, 'fliplr': 0.5, 'bgr': 0.0, 'mosaic': 1.0, 'mixup': 0.0, 'cutmix': 0.0, 'copy_paste': 0.0, 'copy_paste_mode': 'flip', 'auto_augment': 'randaugment', 'erasing': 0.4, 'cfg': None, 'tracker': 'tracktrack.yaml'}
+train_metrics: {'metrics/precision(B)': 0.91654, 'metrics/recall(B)': 0.89576, 'metrics/mAP50(B)': 0.91767, 'metrics/mAP50-95(B)': 0.83032, 'val/box_loss': 0.61607, 'val/cls_loss': 0.39396, 'val/l1_loss': 0.01165, 'fitness': 0.83032}
+date: 2026-08-27T10:54:29.310488+00:00
+
+[THONG KE LAYER]
+Layer 0: Conv, params=928, from=-1
+Layer 1: Conv, params=18,560, from=-1
+Layer 2: C3k2, params=26,080, from=-1
+Layer 3: Conv, params=147,712, from=-1
+Layer 4: C3k2, params=103,360, from=-1
+Layer 5: Conv, params=590,336, from=-1
+Layer 6: C3k2, params=346,112, from=-1
+Layer 7: Conv, params=1,180,672, from=-1
+Layer 8: C3k2, params=1,380,352, from=-1
+Layer 9: SPPF, params=656,896, from=-1
+Layer 10: C2PSA, params=990,976, from=-1
+Layer 11: Upsample, params=0, from=-1
+Layer 12: Concat, params=0, from=[-1, 6]
+Layer 13: C3k2, params=477,184, from=-1
+Layer 14: Upsample, params=0, from=-1
+Layer 15: Concat, params=0, from=[-1, 4]
+Layer 16: C3k2, params=136,192, from=-1
+Layer 17: Conv, params=147,712, from=-1
+Layer 18: Concat, params=0, from=[-1, 13]
+Layer 19: C3k2, params=378,880, from=-1
+Layer 20: Conv, params=590,336, from=-1
+Layer 21: Concat, params=0, from=[-1, 10]
+Layer 22: C3k2, params=1,843,712, from=-1
+Layer 23: Detect, params=933,412, from=[16, 19, 22]
+
+Tong parameters: 9,949,412
+
+[MODEL SUMMARY]

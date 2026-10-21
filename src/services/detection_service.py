@@ -1,190 +1,95 @@
-"""Dịch vụ AI phát hiện lửa và khói kết hợp 2 mô hình (Dual-Model Ensemble).
-Hỗ trợ tiền xử lý ban đêm/IR, hợp nhất weighted agreement, lọc hậu xử lý đa tầng,
-và làm mịn cảnh báo theo chuỗi thời gian (Temporal Smoothing).
+"""Dịch vụ Điều phối Phát hiện Lửa & Khói (Detection Service Orchestrator).
+Tái cấu trúc theo Clean Architecture & Single Responsibility Principle:
+- Đóng vai trò là Nhạc trưởng (Facade Orchestrator) điều phối dòng chảy dữ liệu.
+- Bóc tách toàn bộ suy luận AI sang src.engine.model_detector (MultiModelDetector).
+- Bóc tách thuật toán gộp sang src.engine.bayesian_wbf (BayesianWBF).
+- Bóc tách kiểm định quang học sang src.analytics.candidate_filter (CandidateFilter).
+- Bóc tách hiển thị đồ họa & lưu file sang src.rendering.alert_renderer (AlertRenderer).
+- Bóc tách tăng cường ảnh sang src.utils.image_enhancer.
 """
 
-from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime
 import logging
-from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union, Any
 import cv2
 import numpy as np
-import torch
 
 from src.config import (
     ACTIVE_PROFILE,
-    AGREE_BONUS,
     ALERT_MESSAGES,
-    BRIGHTNESS_THRESHOLD_DARK,
-    BRIGHTNESS_THRESHOLD_IR,
-    BRIGHTNESS_THRESHOLD_NIGHT,
-    CANH_BAO_DIR,
-    CHE_DO_DEM_TU_DONG,
-    CLAHE_CLIP_LIMIT,
     COOLDOWN_CANH_BAO_SEC,
-    CV_COLORS,
     DEFAULT_CONF_THRESHOLD,
-    DEFAULT_DEVICE,
     DEFAULT_IMGSZ,
     DUNG_KHOI_DE_BAO,
-    ENABLE_SPATIAL_CONSISTENCY,
+    ENABLE_DECISION_LOGGER,
     ENSEMBLE_MODE,
-    EXCLUDE_ZONES,
-    EXCLUDE_ZONES_APPLY_SMOKE,
-    FUSE_IOU,
-    GATE_CU,
-    GATE_MOI,
-    HIEN_THI_NGUON_MODEL,
-    IR_COLOR_DIFF_THRESHOLD,
-    IR_SAT_THRESHOLD,
-    KICH_HOAT_LOC_NGUON_SANG_TINH,
-    LOC_DANG_NGUOI_DI_DUONG,
-    MAX_ASPECT_RATIO_LUA,
-    MIN_AREA_RATIO,
+    ENV_HYSTERESIS_SEC,
+    ENVIRONMENT_CONFIGS,
+    FLARE_REALERT_SEC,
+    HARDWARE_PROFILE_OVERRIDE,
     MODEL_CU_PATH,
-    MODEL_MOI_IMGSZ,
     MODEL_MOI_PATH,
-    NIGHT_FIRE_CONF_DOUBLE,
-    NIGHT_FIRE_CONF_SINGLE,
-    NGUONG_CONF_DEM_KHOI,
-    PREDICT_IOU,
-    PREDICT_MAX_DET,
+    MODEL_ONNX_PATH,
+    MODEL_MOI_IMGSZ,
+    MODEL_ONNX_IMGSZ,
     PROFILES,
-    SINGLE_MODEL_PENALTY,
-    SPATIAL_CONSISTENCY_IOU,
-    STATE_BOTH,
+    SO_FRAME_COOLDOWN,
+    SO_FRAME_LUA_LIEN_TIEP,
     STATE_FIRE,
     STATE_NORMAL,
     STATE_SMOKE,
-    STATIC_RELEASE_AREA_GROWTH,
-    TEN_KHOI,
-    TEN_LUA,
-    UU_TIEN_CHO_TOI_VA_NHO,
-    WEIGHT_CU,
-    WEIGHT_MOI,
+    WBF_IOU_THRESH,
+    WBF_SINGLE_PENALTY_ALPHA,
     is_fire,
     is_smoke,
 )
+from src.utils.geometry import compute_iou
+from src.core.entities import (
+    CandidateBox,
+    Detection,
+    EnvironmentType,
+    FrameAnalysisResult,
+    FusedBox,
+)
+from src.engine.bayesian_wbf import BayesianWBF
+from src.engine.model_detector import MultiModelDetector
+from src.analytics.candidate_filter import CandidateFilter
+from src.rendering.alert_renderer import AlertRenderer
+from src.utils.decision_logger import DecisionLogger
+from src.utils.hardware_manager import HardwareManager
+from src.services.scene_auto_configurator import DynamicSceneProfile, SceneAutoConfigurator
 from src.services.static_light_filter import LocNguonSangTinh
-from src.utils.video_utils import compute_iou, scale_bbox
+from src.services.threat_analyzer import ThreatAnalyzer
+from src.utils.image_enhancer import (
+    balance_sunset_illumination,
+    compute_brightness_and_contrast,
+    compute_dynamic_color_mask,
+    enhance_dark_frame_clahe,
+    is_night_or_ir_frame,
+    scale_bbox,
+    suppress_specular_highlights,
+)
 
-logger = logging.getLogger(__name__)
-
-
-def is_in_exclude_zones(
-    bbox: Tuple[int, int, int, int],
-    frame_w: int,
-    frame_h: int,
-    exclude_zones: List[Any],
-) -> Tuple[bool, int]:
-    """
-    Kiểm tra tâm của bounding box có nằm trong vùng loại trừ (EXCLUDE_ZONES) hay không.
-    Trả về (is_in, zone_idx).
-    Zone có thể là:
-    - Bbox chuẩn hóa (x1, y1, x2, y2) với giá trị 0.0 -> 1.0
-    - Hoặc polygon [(x1, y1), (x2, y2), ...]
-    """
-    if not exclude_zones or frame_w <= 0 or frame_h <= 0:
-        return False, -1
-
-    cx = (bbox[0] + bbox[2]) / 2.0
-    cy = (bbox[1] + bbox[3]) / 2.0
-    norm_x = cx / frame_w
-    norm_y = cy / frame_h
-
-    for idx, zone in enumerate(exclude_zones):
-        if len(zone) == 4 and isinstance(zone[0], (int, float)):
-            zx1, zy1, zx2, zy2 = zone
-            min_x, max_x = min(zx1, zx2), max(zx1, zx2)
-            min_y, max_y = min(zy1, zy2), max(zy1, zy2)
-            if min_x <= norm_x <= max_x and min_y <= norm_y <= max_y:
-                return True, idx
-        elif len(zone) >= 3:
-            poly = np.array([[int(p[0] * frame_w), int(p[1] * frame_h)] for p in zone], dtype=np.int32)
-            dist = cv2.pointPolygonTest(poly, (float(cx), float(cy)), False)
-            if dist >= 0:
-                return True, idx
-
-    return False, -1
-
-
-def is_night_or_ir_frame(img: np.ndarray) -> bool:
-    """
-    Phát hiện khung hình ban đêm hoặc camera hồng ngoại (IR):
-    - Đêm thật sự: độ sáng trung bình (Gray) < BRIGHTNESS_THRESHOLD_NIGHT (70.0).
-    - Camera hồng ngoại IR: độ bão hòa rất thấp (< 10.0), chênh lệch màu gần 0 (< 6.0)
-      VÀ độ sáng < BRIGHTNESS_THRESHOLD_IR (95.0).
-    - Ảnh ban ngày (kể cả tông xám/sương mù/bê tông có độ sáng >= 95 hoặc có sắc màu) không bị coi là đêm.
-    """
-    if img is None or img.size == 0:
-        return False
-    try:
-        small = cv2.resize(img, (80, 60))
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        lum = float(np.mean(gray))
-
-        # 1. Đêm thực sự: độ sáng tối rõ rệt
-        if lum < BRIGHTNESS_THRESHOLD_NIGHT:
-            return True
-
-        # 2. Camera hồng ngoại (IR ban đêm / thiếu màu đặc trưng)
-        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-        sat_mean = float(np.mean(hsv[:, :, 1]))
-        diff_rg = np.abs(small[:, :, 2].astype(np.float32) - small[:, :, 1].astype(np.float32))
-        diff_gb = np.abs(small[:, :, 1].astype(np.float32) - small[:, :, 0].astype(np.float32))
-        color_diff = float((np.mean(diff_rg) + np.mean(diff_gb)) / 2.0)
-
-        is_ir = (sat_mean < IR_SAT_THRESHOLD) and (color_diff < IR_COLOR_DIFF_THRESHOLD) and (lum < BRIGHTNESS_THRESHOLD_IR)
-        return is_ir
-    except Exception:
-        return False
-
-
-def enhance_dark_frame_clahe(img: np.ndarray, clip_limit: float = CLAHE_CLIP_LIMIT) -> np.ndarray:
-    """
-    Tăng cường tương phản cục bộ thích ứng (CLAHE) trong không gian màu LAB trên kênh L:
-    - Làm rõ các chi tiết đốm lửa, tia lửa nhỏ trong các vùng tối / ban đêm.
-    - clip_limit nhẹ hơn (1.5) để tránh phóng đại nhiễu hạt (sensor noise).
-    """
-    if img is None or img.size == 0:
-        return img
-    try:
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-        l_clahe = clahe.apply(l)
-        lab_enhanced = cv2.merge((l_clahe, a, b))
-        return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
-    except Exception:
-        return img
+logger = logging.getLogger("FireSmokeAI.DetectionService")
 
 
 def fuse_model_detections(
-    dets_moi: List["Detection"],
-    dets_cu: List["Detection"],
-    iou_thresh: float = FUSE_IOU,
-    weight_moi: float = WEIGHT_MOI,
-    weight_cu: float = WEIGHT_CU,
-    agree_bonus: float = AGREE_BONUS,
-    single_penalty: float = SINGLE_MODEL_PENALTY
-) -> List["Detection"]:
-    """
-    Hợp nhất thông minh phát hiện từ Model Mới và Model Cũ:
-    1. Ghép cặp tham lam các box cùng loại có IoU >= iou_thresh (ưu tiên IoU cao nhất).
-    2. Box được CẢ 2 MODEL ĐỒNG Ý (n_votes = 2):
-       - Tọa độ: Trung bình có trọng số theo (confidence x model_weight).
-       - Conf: Trung bình có trọng số + agree_bonus (khởi đầu 0.10), giới hạn tối đa 0.99.
-         (KHÔNG dùng công thức noisy-OR).
-    3. Box CHỈ 1 MODEL THẤY (n_votes = 1):
-       - Nhân conf với single_penalty (khởi đầu 0.70).
-    """
+    dets_moi: List[Detection],
+    dets_cu: List[Detection],
+    iou_thresh: float = 0.40,
+    weight_moi: float = 1.0,
+    weight_cu: float = 1.0,
+    agree_bonus: float = 0.10,
+    single_penalty: float = 0.70
+) -> List[Detection]:
+    """Hàm hợp nhất cũ giữ lại để tương thích ngược 100% với các bài test."""
     if not dets_moi and not dets_cu:
         return []
 
-    def _make_penalized(d: "Detection") -> "Detection":
+    def _make_penalized(d: Detection) -> Detection:
         penalized_conf = max(0.01, min(0.99, d.confidence * single_penalty))
         return Detection(
             class_id=d.class_id,
@@ -199,11 +104,9 @@ def fuse_model_detections(
 
     if not dets_moi:
         return [_make_penalized(d) for d in dets_cu]
-
     if not dets_cu:
         return [_make_penalized(d) for d in dets_moi]
 
-    # Tìm tất cả các cặp có thể ghép nối
     candidates = []
     for i, d_moi in enumerate(dets_moi):
         cname_moi = d_moi.class_name.lower()
@@ -220,11 +123,10 @@ def fuse_model_detections(
             if iou >= iou_thresh:
                 candidates.append((iou, i, j))
 
-    # Ghép tham lam theo IoU lớn nhất
     candidates.sort(key=lambda x: x[0], reverse=True)
     used_moi = set()
     used_cu = set()
-    fused_results: List["Detection"] = []
+    fused_results: List[Detection] = []
 
     for iou, i, j in candidates:
         if i in used_moi or j in used_cu:
@@ -244,7 +146,6 @@ def fuse_model_detections(
         x2 = int((d_moi.bbox[2] * w1 + d_cu.bbox[2] * w2) / w_total)
         y2 = int((d_moi.bbox[3] * w1 + d_cu.bbox[3] * w2) / w_total)
 
-        # Trung bình có trọng số + agree_bonus (không dùng noisy-OR)
         avg_conf = (d_moi.confidence * w1 + d_cu.confidence * w2) / w_total
         fused_conf = min(0.99, avg_conf + agree_bonus)
 
@@ -259,12 +160,9 @@ def fuse_model_detections(
             n_votes=2
         ))
 
-    # Các box của Model Mới chỉ 1 model thấy
     for i, d_moi in enumerate(dets_moi):
         if i not in used_moi:
             fused_results.append(_make_penalized(d_moi))
-
-    # Các box của Model Cũ chỉ 1 model thấy
     for j, d_cu in enumerate(dets_cu):
         if j not in used_cu:
             fused_results.append(_make_penalized(d_cu))
@@ -272,501 +170,306 @@ def fuse_model_detections(
     return fused_results
 
 
-@dataclass
-class Detection:
-    """Represents a single detected object in a frame."""
-    class_id: int
-    class_name: str
-    confidence: float
-    bbox: Tuple[int, int, int, int]  # (x1, y1, x2, y2) in original frame coords
-    timestamp_sec: float = 0.0
-    frame_index: int = 0
-    model_source: str = "moi"  # 'moi' (fire_yolo) hoặc 'cu' (best.pt) hoặc 'gop'
-    n_votes: int = 1  # Số model xác nhận (2 nếu cả 2 model đồng ý, 1 nếu chỉ 1 model)
-
-
-@dataclass
-class FrameAnalysisResult:
-    """Consolidated detection and alert information for a processed frame."""
-    frame_index: int
-    timestamp_sec: float
-    detections: List[Detection] = field(default_factory=list)
-    has_fire: bool = False
-    has_smoke: bool = False
-    max_fire_conf: float = 0.0
-    max_smoke_conf: float = 0.0
-    alert_state: str = STATE_NORMAL
-    alert_message: str = ALERT_MESSAGES[STATE_NORMAL]
-    inference_time_ms: float = 0.0
-    updated_monotonic: float = field(default_factory=time.monotonic)
-    annotated_frame: Optional[np.ndarray] = None
-    fire_ratio_in_window: str = "0/0"
-    is_alert_confirmed: bool = False
-
-
 class DetectionService:
     """
-    Manages dual-model inference:
-    1. Model Mới: seawsurf/fire_yolo (models/fire_yolo.pt) - tối ưu cho camera đêm/hồng ngoại
-    2. Model Cũ: best.pt (models/best.pt)
-    Combined with weighted agreement fusion, penalty for single-model hits, temporal deque, and static filter.
+    Bộ điều phối trung tâm:
+    - Tiếp nhận frame
+    - Phân tích ngoại cảnh
+    - Điều phối động cơ AI
+    - Hợp nhất Bayesian WBF
+    - Thẩm định đe dọa không-thời gian
+    - Kích hoạt cảnh báo & xuất hình
     """
 
     def __init__(
         self,
         model_path: Optional[Union[str, Path]] = None,
         model_moi_path: Union[str, Path] = MODEL_MOI_PATH,
+        model_onnx_path: Optional[Union[str, Path]] = None,
         conf_threshold: float = DEFAULT_CONF_THRESHOLD,
         imgsz: int = DEFAULT_IMGSZ,
-        device: str = DEFAULT_DEVICE,
-        profile: str = ACTIVE_PROFILE
+        device: Optional[str] = None,
+        profile: str = ACTIVE_PROFILE,
+        hardware_profile_override: Optional[str] = HARDWARE_PROFILE_OVERRIDE,
+        enable_decision_logger: bool = ENABLE_DECISION_LOGGER,
+        enable_adaptive_cascade: bool = False,
     ) -> None:
-        self.device = device
-        self.model_cu_path = Path(model_path) if model_path else MODEL_CU_PATH
-        self.model_moi_path = Path(model_moi_path)
+        # 1. Quản lý phần cứng
+        self.hw_mgr = HardwareManager(override_profile=hardware_profile_override)
+        self.device = device or self.hw_mgr.profile.device
+        self.use_fp16 = self.hw_mgr.profile.use_fp16
+        self.enable_adaptive_cascade = enable_adaptive_cascade
+        self.cascade_scan_interval: int = 25
 
         self.profile = profile if profile in PROFILES else ACTIVE_PROFILE
         self.profile_cfg = PROFILES[self.profile]
-
-        # Ngưỡng quyết định cuối cùng
         self.final_conf_fire = conf_threshold if conf_threshold is not None else self.profile_cfg["FINAL_CONF_FIRE"]
         self.final_conf_smoke = self.profile_cfg["FINAL_CONF_SMOKE"]
 
-        # Ngưỡng cổng thấp cho từng model trước khi gộp
-        self.gate_cu = GATE_CU
-        self.gate_moi = GATE_MOI
-        self.imgsz_cu = imgsz
-        self.imgsz_moi = MODEL_MOI_IMGSZ
+        # Kiểm tra file model tồn tại (Raise lỗi nếu cả 2 model chính đều thiếu)
+        p_cu = Path(model_path) if model_path else MODEL_CU_PATH
+        p_moi = Path(model_moi_path)
+        if not p_cu.exists() and not p_moi.exists():
+            raise FileNotFoundError(f"Không tìm thấy cả model cũ ({p_cu}) và model mới ({p_moi}).")
 
-        self.model_cu = None
-        self.model_moi = None
-        self.names_cu: Dict[int, str] = {}
-        self.names_moi: Dict[int, str] = {}
+        # 2. Khởi tạo Động cơ suy luận đa mô hình (Engine)
+        self.model_detector = MultiModelDetector(
+            model_primary_path=p_cu,
+            model_lowlight_path=p_moi,
+            model_onnx_path=model_onnx_path,
+            device=self.device,
+            use_fp16=self.use_fp16,
+            imgsz_primary=imgsz,
+            imgsz_lowlight=MODEL_MOI_IMGSZ,
+            imgsz_onnx=MODEL_ONNX_IMGSZ
+        )
 
-        # Temporal filter: deque lưu kết quả phát hiện nguy cơ (1/0) trong N lần gần nhất
-        self.fire_history: deque = deque(maxlen=self.profile_cfg["DEQUE_WINDOW_SIZE"])
-        self.min_fire_detections_to_alert = self.profile_cfg["MIN_FIRE_DETECTIONS_TO_ALERT"]
+        # 3. Bộ tự động cấu hình ngoại cảnh (Environment Layer)
+        self.scene_configurator = SceneAutoConfigurator(
+            warmup_frames=30,
+            env_hysteresis_sec=ENV_HYSTERESIS_SEC
+        )
+        self.env_classifier = self.scene_configurator.env_classifier
+
+        # 4. Bộ hợp nhất Bayesian WBF (Engine Layer)
+        self.wbf_fusion = BayesianWBF(
+            iou_thresh=WBF_IOU_THRESH,
+            single_penalty_alpha=WBF_SINGLE_PENALTY_ALPHA
+        )
+
+        # 5. Bộ lọc ứng viên quang học (Analytics Layer)
+        self.candidate_filter = CandidateFilter(
+            final_conf_fire=self.final_conf_fire,
+            final_conf_smoke=self.final_conf_smoke,
+            require_two_votes=self.profile_cfg.get("REQUIRE_TWO_VOTES", False)
+        )
+
+        # 6. Bộ phân tích mối nguy & dấu hiệu sống (Analytics Layer)
+        self.threat_analyzer = ThreatAnalyzer(static_filter=LocNguonSangTinh())
+        self.loc_nguon_sang_tinh = self.threat_analyzer.static_filter
+
+        # 7. Bộ xuất ảnh & trình diễn đồ họa (Rendering Layer)
+        self.alert_renderer = AlertRenderer()
+
+        # 8. Bộ lọc thời gian (Temporal Smoothing Deque)
+        self.fire_history: deque = deque(maxlen=self.profile_cfg.get("TEMPORAL_WINDOW_SIZE", SO_FRAME_COOLDOWN))
+        self.min_fire_detections_to_alert = self.profile_cfg.get("MIN_FIRE_DETECTIONS_TO_ALERT", SO_FRAME_LUA_LIEN_TIEP)
         self.last_alert_time: float = 0.0
 
-        # Bộ nhớ kiểm tra tính nhất quán không gian (Spatial Consistency)
-        self.recent_fire_boxes: deque = deque(maxlen=self.profile_cfg["DEQUE_WINDOW_SIZE"])
-
-        # Bộ lọc nguồn sáng tĩnh (đèn đường, đèn hiên)
-        self.loc_nguon_sang_tinh: Optional[LocNguonSangTinh] = (
-            LocNguonSangTinh() if KICH_HOAT_LOC_NGUON_SANG_TINH else None
-        )
-
-        # Bộ nhớ vùng loại trừ (Exclude Zones) để theo dõi diện tích ban đầu
+        # 9. Bộ ghi log quyết định (Decision Logger)
+        self.decision_logger = DecisionLogger() if enable_decision_logger else None
         self.exclude_zone_baselines: Dict[int, float] = {}
 
-        # Ensure alert output directory exists
-        CANH_BAO_DIR.mkdir(parents=True, exist_ok=True)
+    # Thuộc tính tương thích ngược cho các đoạn mã bên ngoài
+    @property
+    def model_cu(self):
+        return self.model_detector.model_primary
 
-        self._load_models()
+    @property
+    def model_moi(self):
+        return self.model_detector.model_lowlight
 
-    def reset_tracking(self) -> None:
-        """Reset bộ lọc nguồn sáng tĩnh và lịch sử làm mịn khi đổi video hoặc tua vị trí."""
-        self.fire_history.clear()
-        self.exclude_zone_baselines.clear()
-        if self.loc_nguon_sang_tinh:
-            self.loc_nguon_sang_tinh.reset()
+    @property
+    def net_onnx(self):
+        return self.model_detector.net_onnx
 
-    @staticmethod
-    def _parse_names(names_obj) -> Dict[int, str]:
-        """Trích xuất chuẩn xác dictionary {id: name} từ model.names (hỗ trợ cả dict và list/tuple)."""
-        if not names_obj:
-            return {}
-        if isinstance(names_obj, dict):
-            return {int(k): str(v).strip() for k, v in names_obj.items()}
-        if isinstance(names_obj, (list, tuple)):
-            return {int(i): str(v).strip() for i, v in enumerate(names_obj)}
-        return {}
+    @property
+    def names_cu(self):
+        return self.model_detector.names_primary
 
-    def _get_class_name(self, names_dict: Dict[int, str], model_obj, cid: int) -> str:
-        """Đọc tên lớp chính xác từ model.names, bảo đảm không bị mất tên lớp."""
-        if cid in names_dict:
-            return names_dict[cid]
-        if model_obj and hasattr(model_obj, "names") and model_obj.names:
-            if isinstance(model_obj.names, dict) and cid in model_obj.names:
-                return str(model_obj.names[cid]).strip()
-            elif isinstance(model_obj.names, (list, tuple)) and 0 <= cid < len(model_obj.names):
-                return str(model_obj.names[cid]).strip()
-        return f"class_{cid}"
+    @property
+    def names_moi(self):
+        return self.model_detector.names_lowlight
 
-    def _load_models(self) -> None:
-        """Load both models and print model.names."""
-        from ultralytics import YOLO
-
-        # 1. Nạp Model Mới (seawsurf/fire_yolo)
-        if not self.model_moi_path.exists() and self.model_moi_path.name == MODEL_MOI_PATH.name:
-            logger.warning(
-                f"Chưa tìm thấy model mới tại {self.model_moi_path}. "
-                f"Đang tiến hành tải tự động từ Hugging Face..."
-            )
-            from download_model import download_fire_yolo_model
-            try:
-                download_fire_yolo_model()
-            except Exception as e:
-                logger.error(f"Không thể tải model mới: {e}")
-
-        if self.model_moi_path.exists():
-            try:
-                logger.info(f"Đang nạp Model Mới từ {self.model_moi_path} trên {self.device}...")
-                self.model_moi = YOLO(str(self.model_moi_path))
-                if hasattr(self.model_moi, "names"):
-                    self.names_moi = self._parse_names(self.model_moi.names)
-                print(f"[MODEL MỚI] {self.model_moi_path.name} loaded. Classes: {self.names_moi}")
-                logger.info(f"[MODEL MỚI] Classes: {self.names_moi}")
-            except Exception as e:
-                logger.error(f"Lỗi khi nạp model mới {self.model_moi_path}: {e}")
-
-        # 2. Nạp Model Cũ (best.pt)
-        if self.model_cu_path.exists():
-            try:
-                logger.info(f"Đang nạp Model Cũ từ {self.model_cu_path} trên {self.device}...")
-                self.model_cu = YOLO(str(self.model_cu_path))
-                if hasattr(self.model_cu, "names"):
-                    self.names_cu = self._parse_names(self.model_cu.names)
-                print(f"[MODEL CŨ] {self.model_cu_path.name} loaded. Classes: {self.names_cu}")
-                logger.info(f"[MODEL CŨ] Classes: {self.names_cu}")
-            except Exception as e:
-                logger.error(f"Lỗi khi nạp model cũ {self.model_cu_path}: {e}")
-        else:
-            logger.warning(f"Không tìm thấy model cũ tại {self.model_cu_path}.")
-
-        if self.model_moi is None and self.model_cu is None:
-            raise FileNotFoundError("Không thể nạp được bất kỳ model nào (cả model mới và model cũ).")
-
-        self._warmup()
-
-    def _warmup(self) -> None:
-        """Warm-up models on dummy frame."""
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-        with torch.inference_mode():
-            if self.model_moi:
-                try:
-                    _ = self.model_moi.predict(source=dummy, imgsz=self.imgsz_moi, device=self.device, verbose=False)
-                except Exception as e:
-                    logger.debug(f"Warmup model_moi: {e}")
-            if self.model_cu:
-                try:
-                    _ = self.model_cu.predict(source=dummy, imgsz=self.imgsz_cu, device=self.device, verbose=False)
-                except Exception as e:
-                    logger.debug(f"Warmup model_cu: {e}")
-
-    def set_conf_threshold(self, threshold: float) -> None:
-        """
-        Cập nhật ngưỡng quyết định cuối cùng từ thanh trượt UI (bỏ hệ số * 0.6).
-        Thanh trượt điều khiển ngưỡng phân loại CUỐI; 2 model dùng ngưỡng cổng thấp riêng.
-        """
-        th = max(0.05, min(0.95, float(threshold)))
-        self.final_conf_fire = th
-        # Giữ khoảng lệch giữa khói và lửa tương ứng với cấu hình profile
-        delta_smoke = self.profile_cfg["FINAL_CONF_SMOKE"] - self.profile_cfg["FINAL_CONF_FIRE"]
-        self.final_conf_smoke = max(0.05, min(0.95, th + delta_smoke))
-
-    def _predict_single_model(
-        self,
-        model,
-        imgsz: int,
-        default_gate: float,
-        names_dict: Dict[int, str],
-        model_source: str,
-        frame: np.ndarray,
-        conf: Optional[float] = None
-    ) -> List[Detection]:
-        """Phương thức dự đoán chung cho cả Model Cũ và Model Mới."""
-        if model is None:
-            return []
-
-        c_thresh = conf if conf is not None else default_gate
-        try:
-            with torch.inference_mode():
-                results = model.predict(
-                    source=frame,
-                    imgsz=imgsz,
-                    conf=c_thresh,
-                    iou=PREDICT_IOU,
-                    max_det=PREDICT_MAX_DET,
-                    device=self.device,
-                    verbose=False
-                )
-
-            detections: List[Detection] = []
-            if results and len(results) > 0 and results[0].boxes is not None:
-                for box in results[0].boxes:
-                    cid = int(box.cls[0].item())
-                    cf = float(box.conf[0].item())
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                    cname = self._get_class_name(names_dict, model, cid)
-                    detections.append(Detection(
-                        class_id=cid,
-                        class_name=cname,
-                        confidence=cf,
-                        bbox=(x1, y1, x2, y2),
-                        model_source=model_source,
-                        n_votes=1
-                    ))
-            return detections
-        except Exception as e:
-            logger.error(f"Lỗi khi gọi predict ({model_source}): {e}", exc_info=True)
-            return []
+    @property
+    def names_onnx(self):
+        return self.model_detector.names_onnx
 
     def model_cu_phat_hien(self, frame: np.ndarray, conf: Optional[float] = None) -> List[Detection]:
-        """Gọi model cũ phát hiện trên frame với ngưỡng cổng thấp và tham số NMS chuẩn hóa."""
-        return self._predict_single_model(
-            model=self.model_cu,
-            imgsz=self.imgsz_cu,
-            default_gate=self.gate_cu,
-            names_dict=self.names_cu,
-            model_source="cu",
-            frame=frame,
-            conf=conf
-        )
+        """Wrapper gọi Primary Detector, ánh xạ sang Detection object."""
+        cands = self.model_detector.predict_primary(frame, conf=conf)
+        return [Detection(class_id=0 if c.class_name == "fire" else 1, class_name=c.class_name,
+                          confidence=c.confidence, bbox=c.bbox, model_source="best.pt", sources=["best.pt"]) for c in cands]
 
     def model_moi_phat_hien(self, frame: np.ndarray, conf: Optional[float] = None) -> List[Detection]:
-        """Gọi model mới (fire_yolo) phát hiện trên frame."""
-        return self._predict_single_model(
-            model=self.model_moi,
-            imgsz=self.imgsz_moi,
-            default_gate=self.gate_moi,
-            names_dict=self.names_moi,
-            model_source="moi",
-            frame=frame,
-            conf=conf
-        )
+        """Wrapper gọi LowLight Detector, ánh xạ sang Detection object."""
+        cands = self.model_detector.predict_lowlight(frame, conf=conf)
+        return [Detection(class_id=0 if c.class_name == "fire" else 1, class_name=c.class_name,
+                          confidence=c.confidence, bbox=c.bbox, model_source="fire_yolo.pt", sources=["fire_yolo.pt"]) for c in cands]
 
-    def _post_filter_candidates(
-        self,
-        all_detections: List[Detection],
-        frame_w: int,
-        frame_h: int,
-        is_night: bool,
-    ) -> List[Detection]:
-        """
-        Lọc hậu xử lý các box ứng viên sau khi gộp:
-        1. Ngưỡng quyết định cuối cùng (Final Thresholding).
-        2. Yêu cầu 2 model đồng thuận (nếu cấu hình REQUIRE_TWO_VOTES).
-        3. Vùng loại trừ thủ công (EXCLUDE_ZONES) kèm cơ chế mở lại (Safety Release).
-        4. Diện tích tối thiểu (MIN_AREA_RATIO) cho box 1 model.
-        5. Hình dạng người đi đường (H/W >= 2.0 dạng đứng) cho box 1 model.
-        6. Ngưỡng ban đêm / IR phân tầng (NIGHT_FIRE_CONF_SINGLE / DOUBLE).
-        """
-        frame_area = max(1, frame_h * frame_w)
-        require_two_votes = self.profile_cfg.get("REQUIRE_TWO_VOTES", False)
+    def model_onnx_phat_hien(self, frame: np.ndarray, conf: Optional[float] = None) -> List[Detection]:
+        """Wrapper gọi ONNX Detector, ánh xạ sang Detection object."""
+        cands = self.model_detector.predict_onnx(frame, conf=conf)
+        return [Detection(class_id=0 if c.class_name == "fire" else 1, class_name=c.class_name,
+                          confidence=c.confidence, bbox=c.bbox, model_source="best.onnx", sources=["best.onnx"]) for c in cands]
 
-        valid_detections: List[Detection] = []
-        for det in all_detections:
-            cname = det.class_name.lower()
-            w = max(1, det.bbox[2] - det.bbox[0])
-            h = max(1, det.bbox[3] - det.bbox[1])
-            box_area = w * h
-            aspect_ratio = float(h) / float(w)
+    def reset(self) -> None:
+        """Đặt lại trạng thái toàn bộ hệ thống."""
+        self.fire_history.clear()
+        self.last_alert_time = 0.0
+        if self.threat_analyzer:
+            self.threat_analyzer.reset()
+        if self.env_classifier:
+            self.env_classifier.reset()
+        self.exclude_zone_baselines.clear()
 
-            # Ngưỡng quyết định cuối cùng (Final Thresholding)
-            req_conf = self.final_conf_fire if is_fire(cname) else self.final_conf_smoke
-            if det.confidence < req_conf:
-                continue
+    def reset_tracking(self) -> None:
+        """Đặt lại trạng thái theo dõi và bộ nhớ lọc thời gian."""
+        self.reset()
 
-            # Yêu cầu 2 model đồng ý nếu cấu hình profile quy định (ví dụ profile chinh_xac)
-            if require_two_votes and det.n_votes < 2:
-                continue
+    def has_active_hazard(self) -> bool:
+        """Kiểm tra xem hệ thống có đối tượng nghi vấn hoặc báo động nào đang hoạt động không."""
+        if hasattr(self, "threat_analyzer") and self.threat_analyzer:
+            for t in self.threat_analyzer.tracker.tracks.values():
+                if t.state in ("SUSPECT", "CONFIRMED", "ALARM"):
+                    return True
+        if len(self.fire_history) > 0 and self.fire_history[-1] == 1:
+            return True
+        return False
 
-            # Lọc vùng loại trừ thủ công (EXCLUDE_ZONES)
-            if EXCLUDE_ZONES and (is_fire(cname) or (is_smoke(cname) and EXCLUDE_ZONES_APPLY_SMOKE)):
-                in_zone, z_idx = is_in_exclude_zones(det.bbox, frame_w, frame_h, EXCLUDE_ZONES)
-                if in_zone:
-                    base_area = self.exclude_zone_baselines.get(z_idx)
-                    if base_area is None:
-                        self.exclude_zone_baselines[z_idx] = float(box_area)
-                        logger.debug(f"[ExcludeZones] Bỏ qua box nằm trong vùng loại trừ #{z_idx}: bbox={det.bbox}")
-                        continue
-                    elif box_area >= STATIC_RELEASE_AREA_GROWTH * base_area:
-                        logger.warning(
-                            f"[ExcludeZones-Release] ⚠️ MỞ LẠI VÙNG LOẠI TRỪ #{z_idx} do diện tích tăng "
-                            f"{box_area/base_area:.2f}x >= {STATIC_RELEASE_AREA_GROWTH} | bbox={det.bbox}"
-                        )
-                    else:
-                        logger.debug(f"[ExcludeZones] Bỏ qua box nằm trong vùng loại trừ #{z_idx}")
-                        continue
-
-            # Lọc diện tích tối thiểu (MIN_AREA_RATIO):
-            # Box quá nhỏ (< 0.05% diện tích khung) bị loại trừ khi CẢ 2 MODEL ĐỒNG Ý
-            if det.n_votes == 1 and (box_area / frame_area) < MIN_AREA_RATIO:
-                logger.debug(
-                    f"[LocDienTich] Bỏ box quá nhỏ n_votes=1: area={box_area}px ({box_area/frame_area:.4%})"
-                )
-                continue
-
-            # Lọc hình dạng người đi đường (H/W >= 2.0 dạng đứng):
-            # CHỈ áp dụng cho box có n_votes == 1 và conf < 0.45. Cả 2 model đồng ý thì KHÔNG bị loại
-            if LOC_DANG_NGUOI_DI_DUONG and is_fire(cname):
-                if det.n_votes == 1 and aspect_ratio >= MAX_ASPECT_RATIO_LUA and det.confidence < 0.45:
-                    logger.debug(
-                        f"[LocNguoi] Loại bỏ box nghi vấn người/xe máy đứng n_votes=1: "
-                        f"H/W={aspect_ratio:.2f}, conf={det.confidence:.1%}"
-                    )
-                    continue
-
-            # Lọc camera đêm / hồng ngoại:
-            if is_night and CHE_DO_DEM_TU_DONG:
-                if is_fire(cname):
-                    if det.n_votes == 1 and det.confidence < NIGHT_FIRE_CONF_SINGLE:
-                        continue
-                    elif det.n_votes >= 2 and det.confidence < NIGHT_FIRE_CONF_DOUBLE:
-                        continue
-                elif is_smoke(cname):
-                    if det.n_votes == 1 and det.confidence < NGUONG_CONF_DEM_KHOI:
-                        continue
-
-            valid_detections.append(det)
-
-        return valid_detections
+    def get_dynamic_stride(self) -> int:
+        """Lấy bước nhảy khung hình động: nếu có nguy cơ thì siết về 1, bình thường dùng recommended_stride."""
+        if self.has_active_hazard():
+            return 1
+        return self.hw_mgr.profile.recommended_stride
 
     def detect_frame(
         self,
         frame: np.ndarray,
-        frame_index: int = 0,
         timestamp_sec: float = 0.0,
-        conf_threshold: Optional[float] = None
+        frame_index: int = 0
     ) -> FrameAnalysisResult:
         """
-        Chạy phát hiện kết hợp thông minh 2 model:
-        1. Tiền xử lý (nhận diện đêm/IR, CLAHE nhẹ khi thực sự tối).
-        2. Trích xuất box ứng viên ở ngưỡng cổng thấp GATE_MOI, GATE_CU.
-        3. Hợp nhất (Fusion) với thỏa thuận 2 model + phạt box 1 model.
-        4. Lọc diện tích tối thiểu, dáng đứng, ngưỡng đêm, và nguồn sáng tĩnh.
-        5. Xác nhận theo chuỗi frame (temporal confirmation) và phát cảnh báo.
+        Quy trình xử lý khung hình camera chuẩn hóa qua 6 bước.
         """
-        t0 = time.perf_counter()
+        t_start = time.perf_counter()
+        timing_ms: Dict[str, float] = {}
 
-        if conf_threshold is not None:
-            self.set_conf_threshold(conf_threshold)
+        # 1. Đánh giá môi trường & Tối ưu tiền xử lý
+        t_env = time.perf_counter()
+        dyn_profile = self.scene_configurator.update(frame, timestamp_sec)
+        env = dyn_profile.environment
+        env_cfg = ENVIRONMENT_CONFIGS.get(env, ENVIRONMENT_CONFIGS[EnvironmentType.DAY_NORMAL])
+        timing_ms["environment"] = (time.perf_counter() - t_env) * 1000.0
 
-        # 1. Nhận biết ảnh đêm/hồng ngoại và kiểm tra độ sáng thực tế
-        is_night = is_night_or_ir_frame(frame) if CHE_DO_DEM_TU_DONG else False
+        is_night = (env in (EnvironmentType.NIGHT_IR, EnvironmentType.NIGHT_COLOR))
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frame_mean_lum = float(np.mean(frame_gray))
-        is_dark_frame = (frame_mean_lum < BRIGHTNESS_THRESHOLD_DARK)
-
-        # Tăng cường tương phản cục bộ thích ứng (CLAHE) chỉ khi khung hình thật sự tối
-        if UU_TIEN_CHO_TOI_VA_NHO and is_dark_frame:
-            infer_frame = enhance_dark_frame_clahe(frame, clip_limit=CLAHE_CLIP_LIMIT)
+        if env == EnvironmentType.NIGHT_COLOR:
+            infer_frame = enhance_dark_frame_clahe(frame)
+        elif env == EnvironmentType.DUSK_SUNSET:
+            infer_frame = balance_sunset_illumination(frame)
         else:
             infer_frame = frame
 
-        # 2. Gọi Model Mới (fire_yolo.pt) ở ngưỡng cổng thấp
-        detections_moi = self.model_moi_phat_hien(infer_frame, conf=self.gate_moi)
-
-        # 3. Gọi Model Cũ (best.pt) theo chế độ ENSEMBLE_MODE:
-        # - "both": luôn chạy cả 2 model (mặc định)
-        # - "cascade": chỉ gọi best.pt khi fire_yolo có box ứng viên
-        detections_cu: List[Detection] = []
-        if ENSEMBLE_MODE == "cascade":
-            if len(detections_moi) > 0:
-                detections_cu = self.model_cu_phat_hien(infer_frame, conf=self.gate_cu)
-        else:
-            detections_cu = self.model_cu_phat_hien(infer_frame, conf=self.gate_cu)
-
-        # 4. Hợp nhất thông minh phát hiện từ 2 model
-        all_detections = fuse_model_detections(
-            dets_moi=detections_moi,
-            dets_cu=detections_cu,
-            iou_thresh=FUSE_IOU,
-            weight_moi=WEIGHT_MOI,
-            weight_cu=WEIGHT_CU,
-            agree_bonus=self.profile_cfg["AGREE_BONUS"],
-            single_penalty=self.profile_cfg["SINGLE_MODEL_PENALTY"]
+        # 2. Suy luận AI đa mô hình
+        is_cpu = (self.device == "cpu")
+        has_hazard = (len(self.fire_history) > 0 and self.fire_history[-1] == 1)
+        is_periodic_scan = (frame_index % self.cascade_scan_interval == 0)
+        use_cascade = (
+            (ENSEMBLE_MODE == "cascade") or
+            (self.enable_adaptive_cascade and is_cpu and not has_hazard and not is_periodic_scan)
         )
-        for det in all_detections:
-            det.frame_index = frame_index
-            det.timestamp_sec = timestamp_sec
+        include_onnx = (self.net_onnx is not None and ENSEMBLE_MODE in ("tri", "all"))
 
-        # 5. LỌC HẬU XỬ LÝ (Ngưỡng cuối, diện tích, dáng người/xe, chế độ đêm)
-        frame_h, frame_w = frame.shape[:2]
-        all_detections = self._post_filter_candidates(
-            all_detections=all_detections,
-            frame_w=frame_w,
-            frame_h=frame_h,
-            is_night=is_night
+        candidates_wbf, infer_timings = self.model_detector.predict_all(
+            frame=infer_frame,
+            use_cascade=use_cascade,
+            include_onnx=include_onnx
         )
+        timing_ms.update(infer_timings)
 
-        # 6. BỘ LỌC NGUỒN SÁNG TĨNH (LocNguonSangTinh)
-        if KICH_HOAT_LOC_NGUON_SANG_TINH and self.loc_nguon_sang_tinh is not None:
-            all_detections, static_lights = self.loc_nguon_sang_tinh.filter_detections(
-                frame=frame,
-                detections=all_detections,
+        # 3. Hợp nhất Bayesian WBF
+        t_wbf = time.perf_counter()
+        total_active_models = 3 if include_onnx else 2
+        fused_boxes = self.wbf_fusion.fuse(
+            candidates=candidates_wbf,
+            model_weights=dyn_profile.model_weights,
+            total_models_active=total_active_models
+        )
+        timing_ms["wbf_fusion"] = (time.perf_counter() - t_wbf) * 1000.0
+
+        all_detections: List[Detection] = [
+            Detection(
+                class_id=0 if fb.class_name == "fire" else 1,
+                class_name=fb.class_name,
+                confidence=fb.confidence,
+                bbox=fb.bbox,
+                timestamp_sec=timestamp_sec,
                 frame_index=frame_index,
-                timestamp_sec=timestamp_sec
+                model_source="gop",
+                n_votes=fb.n_votes,
+                threat_status="xac_nhan",
+                sources=fb.sources,
+                environment=env
             )
+            for fb in fused_boxes
+        ]
 
-        # Xác định Lửa và Khói
-        has_fire = any(is_fire(det.class_name) for det in all_detections)
-        has_smoke = any(is_smoke(det.class_name) for det in all_detections)
-
-        # Kiểm tra tính nhất quán không gian (Tùy chọn Spatial Consistency)
-        if ENABLE_SPATIAL_CONSISTENCY and has_fire and len(self.recent_fire_boxes) > 0:
-            current_fire_boxes = [d.bbox for d in all_detections if is_fire(d.class_name)]
-            has_spatial_match = any(
-                compute_iou(b_curr, b_past) >= SPATIAL_CONSISTENCY_IOU
-                for b_curr in current_fire_boxes
-                for past_list in self.recent_fire_boxes
-                for b_past in past_list
-            )
-            if not has_spatial_match and all(d.n_votes == 1 for d in all_detections if is_fire(d.class_name)):
-                has_fire = False
-
-        self.recent_fire_boxes.append([d.bbox for d in all_detections if is_fire(d.class_name)])
-
-        max_fire_conf = max(
-            [d.confidence for d in all_detections if is_fire(d.class_name)],
-            default=0.0
-        )
-        max_smoke_conf = max(
-            [d.confidence for d in all_detections if is_smoke(d.class_name)],
-            default=0.0
+        # 4. Lọc hậu xử lý hình học & biển báo
+        all_detections, suppressed_list = self.candidate_filter.filter(
+            all_detections=all_detections,
+            frame_shape=frame.shape[:2],
+            environment=env,
+            env_cfg=env_cfg,
+            dyn_profile=dyn_profile,
+            frame_gray=frame_gray,
+            frame_bgr=frame
         )
 
-        # 7. Bộ lọc thời gian: deque lưu vết phát hiện nguy cơ (Lửa hoặc Khói)
+        # 5. Phân tích mối nguy & dấu hiệu sống (ThreatAnalyzer)
+        t_ta = time.perf_counter()
+        all_detections, bypass_fast_alert = self.threat_analyzer.analyze(
+            candidates=all_detections,
+            raw_gray=frame_gray,
+            timestamp_monotonic=time.monotonic(),
+            is_night=is_night,
+            frame_index=frame_index,
+            timestamp_sec=timestamp_sec
+        )
+        timing_ms["threat_analyzer"] = (time.perf_counter() - t_ta) * 1000.0
+
+        # 6. Đánh giá trạng thái nguy cơ & Cảnh báo
+        has_fire = any(is_fire(d.class_name) and getattr(d, "threat_status", "xac_nhan") != "cho_xac_nhan" for d in all_detections)
+        has_smoke = any(is_smoke(d.class_name) for d in all_detections)
+        has_flare = any(getattr(d, "threat_status", "") == "bung_lua" for d in all_detections)
+
+        max_fire_conf = max([d.confidence for d in all_detections if is_fire(d.class_name)], default=0.0)
+        max_smoke_conf = max([d.confidence for d in all_detections if is_smoke(d.class_name)], default=0.0)
+
         is_hazard = has_fire or (has_smoke and DUNG_KHOI_DE_BAO)
         self.fire_history.append(1 if is_hazard else 0)
-        hazard_detections_in_window = sum(self.fire_history)
-        history_len = len(self.fire_history)
-        fire_ratio_str = f"{hazard_detections_in_window}/{history_len}"
+        hazard_in_win = sum(self.fire_history)
+        fire_ratio_str = f"{hazard_in_win}/{len(self.fire_history)}"
 
-        is_alert_confirmed = hazard_detections_in_window >= self.min_fire_detections_to_alert
+        is_alert_confirmed = (hazard_in_win >= self.min_fire_detections_to_alert)
+        has_alarm_track = any(
+            (getattr(d, "track_state", "") == "ALARM" and getattr(d, "evidence_score", 0.0) >= 85.0)
+            for d in all_detections if (is_fire(d.class_name) or (is_smoke(d.class_name) and DUNG_KHOI_DE_BAO))
+        )
+        if (bypass_fast_alert and has_flare) or has_alarm_track:
+            is_alert_confirmed = True
 
-        # 8. Phát cảnh báo và cooldown (chỉ khi có lửa thật)
+        # Kích hoạt chuông còi và lưu ảnh cảnh báo
         now = time.time()
-        if is_alert_confirmed and has_fire and (now - self.last_alert_time >= COOLDOWN_CANH_BAO_SEC):
+        effective_cooldown = FLARE_REALERT_SEC if (has_flare and bypass_fast_alert) else COOLDOWN_CANH_BAO_SEC
+        is_hazard_active = has_fire or (has_smoke and DUNG_KHOI_DE_BAO)
+        if is_alert_confirmed and is_hazard_active and (now - self.last_alert_time >= effective_cooldown):
             self.last_alert_time = now
-            self._trigger_fire_alarm(frame, max_fire_conf, timestamp_sec, fire_ratio_str)
+            effective_conf = max_fire_conf if has_fire else max_smoke_conf
+            self._trigger_fire_alarm(frame, all_detections, timestamp_sec, effective_conf, fire_ratio_str)
 
-        # 9. Xác định trạng thái cảnh báo giao diện
-        if is_alert_confirmed:
-            if has_fire and has_smoke and DUNG_KHOI_DE_BAO:
-                alert_state = STATE_BOTH
-                alert_msg = f"{ALERT_MESSAGES[STATE_BOTH]} ({fire_ratio_str} lần | Lửa: {max_fire_conf:.1%} | Khói: {max_smoke_conf:.1%})"
-            elif has_fire:
-                alert_state = STATE_FIRE
-                alert_msg = f"{ALERT_MESSAGES[STATE_FIRE]} ({fire_ratio_str} lần | Lửa: {max_fire_conf:.1%})"
-            elif has_smoke and DUNG_KHOI_DE_BAO:
-                alert_state = STATE_SMOKE
-                alert_msg = f"{ALERT_MESSAGES[STATE_SMOKE]} ({fire_ratio_str} lần | Khói: {max_smoke_conf:.1%})"
-            else:
-                alert_state = STATE_NORMAL
-                alert_msg = ALERT_MESSAGES[STATE_NORMAL]
-        elif has_fire:
-            alert_state = STATE_NORMAL
-            alert_msg = f"Đang theo dõi đốm lửa nghi vấn ({max_fire_conf:.1%})..."
-        elif has_smoke and DUNG_KHOI_DE_BAO:
-            alert_state = STATE_NORMAL
-            alert_msg = f"Đang theo dõi làn khói nghi vấn ({max_smoke_conf:.1%})..."
+        # Tổng hợp trạng thái
+        if has_fire:
+            alert_state = STATE_FIRE
+            alert_msg = ALERT_MESSAGES[STATE_FIRE]
+        elif has_smoke:
+            alert_state = STATE_SMOKE
+            alert_msg = ALERT_MESSAGES[STATE_SMOKE]
         else:
             alert_state = STATE_NORMAL
             alert_msg = ALERT_MESSAGES[STATE_NORMAL]
 
-        inf_time_ms = (time.perf_counter() - t0) * 1000.0
+        total_time_ms = (time.perf_counter() - t_start) * 1000.0
 
         return FrameAnalysisResult(
             frame_index=frame_index,
@@ -778,33 +481,43 @@ class DetectionService:
             max_smoke_conf=max_smoke_conf,
             alert_state=alert_state,
             alert_message=alert_msg,
-            inference_time_ms=inf_time_ms,
-            updated_monotonic=time.monotonic(),
+            inference_time_ms=total_time_ms,
             fire_ratio_in_window=fire_ratio_str,
-            is_alert_confirmed=is_alert_confirmed
+            is_alert_confirmed=is_alert_confirmed,
+            bypass_fast_alert=bypass_fast_alert,
+            environment=env,
+            timing_ms=timing_ms,
+            scene_status_text=f"{env} | Conf: {max_fire_conf:.1%}",
+            dynamic_conf_fire=dyn_profile.confidence_fire,
+            dynamic_conf_smoke=dyn_profile.confidence_smoke,
+            camera_shake=dyn_profile.camera_shake,
+            noise_level=dyn_profile.noise_level
         )
 
     def _trigger_fire_alarm(
         self,
         frame: np.ndarray,
-        max_fire_conf: float,
+        detections: List[Detection],
         timestamp_sec: float,
-        fire_ratio_str: str
+        max_fire_conf: float,
+        fire_ratio_str: str,
     ) -> None:
-        """In CẢNH BÁO CHÁY ra console và lưu ảnh cảnh báo vào thư mục canh_bao/."""
+        """Kích hoạt chuông còi phần cứng và lưu ảnh cảnh báo."""
         ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         print("\n" + "=" * 55)
         print(f"🔥 CẢNH BÁO CHÁY! [Tỉ lệ: {fire_ratio_str}] - Độ tin cậy: {max_fire_conf:.1%}")
         print(f"   Thời điểm video: {timestamp_sec:.2f}s | Thời gian hệ thống: {ts_str}")
         print("=" * 55 + "\n")
 
-        # Lưu ảnh cảnh báo
-        try:
-            save_path = CANH_BAO_DIR / f"canh_bao_{ts_str}_{int(timestamp_sec)}s.jpg"
-            cv2.imwrite(str(save_path), frame)
-            logger.info(f"Đã lưu ảnh cảnh báo cháy vào: {save_path.resolve()}")
-        except Exception as e:
-            logger.error(f"Lỗi khi lưu ảnh cảnh báo cháy: {e}")
+        # Vẽ và lưu ảnh cảnh báo qua AlertRenderer
+        annotated = self.alert_renderer.annotate_alert_frame(
+            frame=frame,
+            detections=detections,
+            timestamp_sec=timestamp_sec,
+            max_fire_conf=max_fire_conf,
+            fire_ratio_str=fire_ratio_str
+        )
+        self.alert_renderer.save_alert_image(annotated, timestamp_sec)
 
     def draw_annotations_on_letterbox(
         self,
@@ -814,74 +527,5 @@ class DetectionService:
         pad_x: int,
         pad_y: int
     ) -> np.ndarray:
-        """Vẽ bounding box của Model Lửa Gộp: chỉ hiện 'LUA: xx%' hoặc 'KHOI: xx%', không hiện Mới hay Cũ."""
-        for det in detections:
-            x1, y1, x2, y2 = scale_bbox(det.bbox, scale, pad_x, pad_y)
-            cname_lower = det.class_name.lower()
-
-            # Chọn màu và nhãn hiển thị thống nhất cho Model Lửa Gộp
-            if is_fire(cname_lower):
-                color = CV_COLORS["fire"]
-                label_prefix = "LUA"
-            elif is_smoke(cname_lower):
-                color = CV_COLORS["smoke"]
-                label_prefix = "KHOI"
-            else:
-                color = CV_COLORS["default"]
-                label_prefix = det.class_name.upper()
-
-            # Nếu bật cờ hiển thị nguồn (mặc định False), chỉ hiện [GOP], tuyệt đối không hiện Mới hay Cũ
-            if HIEN_THI_NGUON_MODEL:
-                label_prefix = f"{label_prefix} [GOP]"
-
-            # Vẽ khung bao
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-
-            # Vẽ nhãn
-            text = f"{label_prefix}: {det.confidence:.1%}"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
-            thickness = 1
-
-            (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-            bg_y1 = max(0, y1 - text_h - 6)
-            bg_y2 = y1
-            bg_x2 = min(canvas.shape[1], x1 + text_w + 8)
-
-            cv2.rectangle(canvas, (x1, bg_y1), (bg_x2, bg_y2), color, -1)
-            cv2.putText(
-                canvas,
-                text,
-                (x1 + 4, y1 - 4),
-                font,
-                font_scale,
-                (255, 255, 255),
-                thickness,
-                lineType=cv2.LINE_AA
-            )
-
-        # Vẽ các vùng loại trừ thủ công (EXCLUDE_ZONES) bằng viền mờ màu cam
-        if EXCLUDE_ZONES:
-            img_w = canvas.shape[1] - 2 * pad_x
-            img_h = canvas.shape[0] - 2 * pad_y
-            for z_idx, zone in enumerate(EXCLUDE_ZONES):
-                if len(zone) == 4 and isinstance(zone[0], (int, float)):
-                    zx1, zy1, zx2, zy2 = zone
-                    cx1 = int(pad_x + min(zx1, zx2) * img_w)
-                    cy1 = int(pad_y + min(zy1, zy2) * img_h)
-                    cx2 = int(pad_x + max(zx1, zx2) * img_w)
-                    cy2 = int(pad_y + max(zy1, zy2) * img_h)
-
-                    cv2.rectangle(canvas, (cx1, cy1), (cx2, cy2), (0, 165, 255), 1, cv2.LINE_AA)
-                    cv2.putText(
-                        canvas,
-                        f"VUNG LOAI TRU #{z_idx + 1}",
-                        (cx1 + 2, max(12, cy1 - 4)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.38,
-                        (0, 165, 255),
-                        1,
-                        lineType=cv2.LINE_AA
-                    )
-
-        return canvas
+        """Vẽ bounding box của các phát hiện lên canvas letterbox dùng hiển thị GUI."""
+        return self.alert_renderer.draw_annotations_on_letterbox(canvas, detections, scale, pad_x, pad_y)

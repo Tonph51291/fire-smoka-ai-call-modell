@@ -34,6 +34,7 @@ def main() -> None:
         detection_service = DetectionService(
             model_path=DEFAULT_MODEL_PATH,
             conf_threshold=DEFAULT_CONF_THRESHOLD
+            
         )
         logger.info(f"Đã nạp model AI thành công từ: {DEFAULT_MODEL_PATH}")
     except FileNotFoundError as fnf_err:

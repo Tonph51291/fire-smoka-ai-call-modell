@@ -381,8 +381,14 @@ class VideoService:
                 time.sleep(0.01)
                 continue
 
-            # Chỉ xử lý 1 trên N frame (FRAME_STRIDE)
-            if self._last_inferred_idx >= 0 and (idx_to_process - self._last_inferred_idx) < self.frame_stride:
+            # Bước nhảy thích ứng (Dynamic Stride):
+            # Nếu AI đang phát hiện nguy cơ (SUSPECT, ALARM): siết về stride 1 để phản ứng tức thì
+            # Nếu bình thường (NORMAL): áp dụng frame_stride được đề xuất theo năng lực phần cứng
+            effective_stride = self.frame_stride
+            if self.detection_service and hasattr(self.detection_service, "get_dynamic_stride"):
+                effective_stride = self.detection_service.get_dynamic_stride()
+
+            if self._last_inferred_idx >= 0 and (idx_to_process - self._last_inferred_idx) < effective_stride:
                 time.sleep(0.01)
                 continue
 

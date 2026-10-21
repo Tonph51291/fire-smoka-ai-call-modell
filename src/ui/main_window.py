@@ -147,7 +147,15 @@ class MainWindow:
             padx=12,
             anchor="w"
         )
-        self.lbl_filename.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.lbl_scene_status = tk.Label(
+            top_container,
+            text="⚙️ Tự động thích ứng ngoại cảnh: Sẵn sàng",
+            font=("Segoe UI", 9, "bold"),
+            fg="#63B3ED",
+            bg=UI_COLORS["card_bg"],
+            anchor="e"
+        )
+        self.lbl_scene_status.pack(side=tk.RIGHT, padx=(0, 12))
 
         self.lbl_video_meta = tk.Label(
             top_container,
@@ -380,6 +388,8 @@ class MainWindow:
             self.lbl_status.configure(
                 text=f"FPS Video: {disp_fps:4.1f} | FPS AI: {inf_fps:4.1f} ({inf_ms:3.0f}ms) | {DEVICE_NAME}"
             )
+            if inf and getattr(inf, "scene_status_text", ""):
+                self.lbl_scene_status.configure(text=f"⚙️ {inf.scene_status_text}")
 
         except Exception as e:
             logger.error(f"Lỗi trong render tick: {e}", exc_info=True)

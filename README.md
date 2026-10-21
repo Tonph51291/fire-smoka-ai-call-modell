@@ -1,150 +1,186 @@
-# Ứng Dụng AI Phát Hiện Cháy & Khói Chạy Song Song 2 Model (Fire & Smoke AI)
+# Hệ Thống AI Phát Hiện Cháy & Khói Thời Gian Thực Đa Mô Hình (Fire & Smoke AI)
 
-Ứng dụng Desktop chạy cục bộ (local) trên Windows sử dụng Python, Tkinter, OpenCV và thư viện Ultralytics YOLO để phát hiện và cảnh báo Lửa (Fire) và Khói (Smoke) theo thời gian thực từ video/camera.
-
-Hệ thống hỗ trợ **chạy song song 2 mô hình AI (Dual-Model Ensemble)** kết hợp logic OR, tối ưu hóa phát hiện lửa cả ban ngày lẫn ban đêm (chế độ hồng ngoại / ảnh đen trắng của camera giám sát).
+Hệ thống thị giác máy tính thông minh chạy cục bộ (local) trên Windows/Linux, ứng dụng kỹ thuật **Hợp nhất đa mô hình (Tri-Model Ensemble)** kết hợp **Bám vết không - thời gian (Spatio-Temporal Tracking)** và **Bộ tích lũy bằng chứng thời gian thực (Evidence Accumulator)** nhằm phát hiện sớm ngọn lửa và làn khói từ camera giám sát (ban ngày, ban đêm, camera hồng ngoại IR).
 
 ---
 
-## 📌 Tính năng nổi bật
+## 🌟 Các Tính Năng Nổi Bật
 
-1. **Chạy song song 2 Model AI (Dual-Model OR Logic)**:
-   - **Model Hiện Có (`models/best.pt`)**: Nhận diện lửa và khói môi trường chuẩn.
-   - **Model Bổ Sung (`models/fire_yolo.pt`)**: Tải từ Hugging Face [`seawsurf/fire_yolo`](https://huggingface.co/seawsurf/fire_yolo), tối ưu cho nhận diện lửa sáng trong camera đêm / hồng ngoại.
-   - Kết hợp kiểu **OR**: Báo động cháy nếu một trong hai model phát hiện lửa.
-2. **Bộ lọc thời gian giảm báo nhầm (Temporal Smoothing Filter)**:
-   - Sử dụng `collections.deque(maxlen=10)`, chỉ kích hoạt báo động khi có **ít nhất 5 trên 10 lần** xử lý gần nhất phát hiện lửa.
-3. **Phát cảnh báo & Cooldown**:
-   - Khi có cháy thật được xác nhận: In `CẢNH BÁO CHÁY` ra console, tự động lưu ảnh chụp frame vào thư mục `canh_bao/`.
-   - Có thời gian chờ (cooldown 30s) chống spam báo động liên tục.
-4. **Phát video mượt mà trên giao diện**:
-   - Hiển thị frame trực tiếp trên canvas Tkinter (sử dụng Pillow), không phụ thuộc vào `cv2.imshow()`.
-   - Khung giao diện cố định 100%, không bị nhảy layout khi phát các video kích thước khác nhau.
-5. **Đa luồng độc lập (3 Threads)**:
-   - **Playback Thread**: Đồng bộ theo đồng hồ thực `time.monotonic()`, bỏ frame qua `cap.grab()` nếu bị chậm.
-   - **Inference Thread**: Chạy AI nền bất đồng bộ với `FRAME_STRIDE = 3` (xử lý 1 trên 3 frame), không chặn video.
-   - **UI Main Thread**: Render mượt mà, bounding box hiển thị trực tiếp trên canvas.
-6. **Bộ script kiểm thử độc lập `test_anh.py`**:
-   - Chạy riêng từng model trên ảnh tĩnh.
-   - Hỗ trợ 4 chế độ test camera đêm: Ảnh gốc, Ngưỡng nhạy conf=0.05, Grayscale 3 kênh (hồng ngoại), Tăng tương phản Gamma. Kết quả lưu vào `runs_test/`.
+### 1. Hợp nhất 3 Mô hình AI (Tri-Model Ensemble qua WBF)
+- **Model Mới (`models/fire_yolo.pt`)**: YOLO 640x640 từ Hugging Face [`seawsurf/fire_yolo`](https://huggingface.co/seawsurf/fire_yolo), tối ưu cho camera đêm và hồng ngoại.
+- **Model Gốc (`models/best.pt`)**: YOLO 640x640 nhận diện lửa và khói bối cảnh chuẩn.
+- **Model ONNX (`models/best.onnx`)**: YOLO 320x320 siêu nhẹ, suy luận trực tiếp qua `cv2.dnn`.
+- **Weighted Boxes Fusion (WBF)**: Hợp nhất tọa độ và hiệu chuẩn độ tin cậy trung thực, loại bỏ hoàn toàn hiện tượng trần điểm số ảo $99\%$.
+
+### 2. Phân loại môi trường ánh sáng thích ứng (Environment Classifier)
+- Tự động nhận diện 6 môi trường quang học: `DAY_NORMAL`, `DAY_BRIGHT`, `DAY_FOGGY`, `NIGHT_COLOR`, `NIGHT_IR`, `SUNSET_DAWN`.
+- Tích hợp bộ trễ (Hysteresis) theo thời gian video, tự động tinh chỉnh trọng số từng model theo điều kiện ánh sáng.
+
+### 3. Bộ lọc nguồn sáng tĩnh & Phạt mềm (LocNguonSangTinh)
+- Triệt tiêu báo động giả từ đèn đường, đèn hiên, biển báo phản quang bằng cách đo đạc độ dịch tâm ($v_{\text{drift}}$), độ biến thiên nội dung pixel, độ nhẵn viền và bão hòa lõi đèn.
+- Không xóa cứng mà áp dụng **Phạt mềm ($K_{\text{static}} = 0.25$)**. Tích hợp cơ chế **Safety Release** tự động mở khóa ngay khi diện tích tăng vọt hoặc xuất hiện dấu hiệu cháy lan.
+
+### 4. Bám vết không - thời gian & Máy trạng thái tích lũy bằng chứng
+- **SpatioTemporalTracker**: Hàm tương đồng đa tiêu chí kết hợp $0.50 \cdot \text{IoU} + 0.30 \cdot \text{Containment} + 0.20 \cdot \text{Distance}$, duy trì ổn định Track ID cho vật thể biến dạng, giãn nở và dâng cao.
+- **MotionFeatureExtractor**: Đo vận tốc trôi chuẩn hóa $v_{\text{drift}}$, độ dâng cao của cột khói, độ nham nhở viền bập bùng ($\text{Roughness} \ge 1.25$) và phát hiện chuyển động thẳng hàng của đèn xe.
+- **EvidenceAccumulator**: Máy trạng thái 4 mức (`NONE` $\rightarrow$ `SUSPECT` $\rightarrow$ `CONFIRMED` $\rightarrow$ `ALARM`) với tích lũy bằng chứng $E(t) \in [0, 100]$ phân rã hàm mũ liên tục theo thời gian thực:
+  $$E(t) = E(t - \Delta t) \cdot e^{-\Delta t / \tau} + \Delta E$$
+  Tách biệt chu kỳ phân rã cho Lửa ($\tau_{\text{fire}} = 2.5\text{s}$) và Khói ($\tau_{\text{smoke}} = 8.0\text{s}$).
+
+### 5. Điều phối mô hình thích ứng & Dynamic Stride (Tối ưu CPU/GPU)
+- **Adaptive Model Scheduler**: Trên môi trường CPU, hệ thống chạy trước ONNX 320 (~40ms); khi phát hiện nghi vấn sẽ đánh thức ngay các mô hình PyTorch để thẩm định chéo. Quét Full Ensemble định kỳ mỗi 25 frame (1 giây) để đảm bảo không bỏ sót điểm mù.
+- **Dynamic Stride**: Tự động nhảy frame thích ứng (`stride = 2` trên CPU) khi bình thường, và lập tức **siết về `stride = 1`** khi phát hiện đối tượng nghi vấn.
+- **Multi-threaded Video Pipeline**: Tách biệt luồng phát mượt (Playback Thread) và luồng suy luận AI (Inference Thread) theo cơ chế Single-Slot Overwrite (Zero Buffer Lag).
+
+### 6. Thu thập mẫu khó tự động (Active Learning / Hard Negative Harvesting)
+- Khi phát hiện nguồn sáng tĩnh hoặc đèn xe bị triệt tiêu, hệ thống tự động lưu trữ bộ 3 dữ liệu vào `hard_negatives/`: ảnh full frame (`*_full.jpg`), ảnh crop (`*_crop.jpg`) và file metadata chuẩn (`*_meta.json` ghi nhận drift, flicker std, core saturation, bbox) để tái huấn luyện model.
 
 ---
 
-## 🏗️ Cấu trúc dự án
+## 🏗️ Cấu Trúc Dự Án
 
 ```text
 fire-smoke-ai/
 ├── src/
 │   ├── __init__.py
-│   ├── main.py                     # Entry point chính của ứng dụng
-│   ├── config.py                   # CẤU HÌNH TẬP TRUNG TOÀN BỘ HẰNG SỐ VÀ NGƯỠNG
+│   ├── main.py                         # Entry point chính của ứng dụng Desktop Tkinter
+│   ├── config.py                       # Cấu hình tập trung toàn bộ ngưỡng, tham số và profile
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── detection_service.py    # Quản lý 2 model YOLO, OR logic, temporal filter, alert
-│   │   └── video_service.py        # Quản lý phát video, đa luồng playback và inference
+│   │   ├── detection_service.py        # Dịch vụ suy luận đa mô hình, Dynamic Stride, WBF
+│   │   ├── hardware_manager.py         # Nhận diện CPU/GPU, VRAM, RAM và benchmark khởi động
+│   │   ├── environment_classifier.py   # Phân loại 6 môi trường ánh sáng có Hysteresis
+│   │   ├── ensemble_wbf.py             # Thuật toán Weighted Boxes Fusion (WBF)
+│   │   ├── static_light_filter.py      # Bộ lọc nguồn sáng tĩnh, Static Memory và Hard Negative
+│   │   ├── spatio_temporal_tracker.py  # Bộ bám vết đa tiêu chí (IoU + Containment + Distance)
+│   │   ├── motion_feature_extractor.py # Đo động học v_drift, cột khói, roughness, đèn xe
+│   │   ├── evidence_accumulator.py     # Máy trạng thái 4 mức & Tích lũy bằng chứng E(t)
+│   │   ├── threat_analyzer.py          # Bộ phân tích nguy cơ, bùng cháy khẩn cấp & cổng liveness
+│   │   ├── decision_logger.py          # Ghi log quyết định từng frame có cấu trúc (JSONL)
+│   │   └── video_service.py            # Quản lý phát video đa luồng và suy luận bất đồng bộ
 │   ├── ui/
 │   │   ├── __init__.py
-│   │   └── main_window.py          # Giao diện người dùng Tkinter Canvas + Pillow
+│   │   └── main_window.py              # Giao diện người dùng Tkinter Canvas + Pillow
 │   └── utils/
 │       ├── __init__.py
-│       └── video_utils.py          # Tiện ích format timestamp, letterbox, scale bbox
+│       ├── geometry.py                 # Chuẩn hóa letterbox 2 chiều, IoU, Containment
+│       └── video_utils.py              # Tiện ích đọc metadata video và format timestamp
 ├── models/
-│   ├── best.pt                     # Model Cũ (Classes: Fire, Smoke)
-│   └── fire_yolo.pt                # Model Mới từ Hugging Face (Classes: fire, smoke)
-├── canh_bao/                       # Thư mục tự động lưu ảnh khi kích hoạt báo cháy
-├── runs_test/                      # Thư mục lưu ảnh kết quả khi chạy test_anh.py
-├── test_anh.py                     # Script kiểm thử độc lập trên ảnh tĩnh
-├── download_model.py               # Script tải model tự động từ Hugging Face Hub
-├── tests/                          # Bộ 19 unit tests tự động
+│   ├── best.pt                         # Model YOLOv8 PyTorch (Classes: Fire, Smoke)
+│   ├── fire_yolo.pt                    # Model YOLOv8 PyTorch (Classes: fire, smoke)
+│   └── best.onnx                       # Model YOLOv8 ONNX 320x320 chạy cv2.dnn
+├── images/                             # Tập ảnh kiểm thử thực tế đa môi trường
+├── scripts/
+│   ├── regression_baseline.py          # Runner kiểm chuẩn hồi quy trên tập ảnh mẫu
+│   └── benchmark_performance.py        # Runner đo kiểm hiệu năng so sánh Baseline và Adaptive
+├── tests/                              # Bộ 33 unit tests tự động (100% Passed)
 │   ├── test_config.py
 │   ├── test_utils.py
 │   ├── test_detection_service.py
+│   ├── test_static_light_filter.py
+│   ├── test_evidence_accumulator.py
+│   ├── test_adaptive_scheduler.py
 │   └── test_video_service.py
-├── videos/                         # Thư mục chứa video mẫu
-├── requirements.txt                # Danh sách thư viện phụ thuộc
-├── .gitignore                      # Loại trừ file rác, virtualenv và cache
-└── README.md                       # Tài liệu hướng dẫn sử dụng
+├── canh_bao/                           # Thư mục tự động lưu frame khi kích hoạt báo cháy
+├── hard_negatives/                     # Thư mục lưu mẫu âm tính kèm metadata JSON
+├── runs/                               # Kết quả log quyết định (decision_log.jsonl, benchmark)
+├── requirements.txt                    # Thư viện phụ thuộc
+└── README.md                           # Tài liệu hướng dẫn sử dụng
 ```
 
 ---
 
-## ⚙️ Cài đặt môi trường
+## ⚙️ Cài Đặt Môi Trường
+
+### 1. Tạo và kích hoạt môi trường ảo (Python 3.10+)
 
 ```powershell
-# 1. Tạo và kích hoạt môi trường ảo
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+```
 
-# 2. Cài đặt thư viện
+### 2. Cài đặt thư viện phụ thuộc
+
+```powershell
 pip install -r requirements.txt
 ```
 
-*(Lưu ý: Yêu cầu `ultralytics >= 8.3.0` và `huggingface_hub >= 0.20.0`).*
+*(Lưu ý: Đối với máy có GPU NVIDIA, khuyến khích cài đặt bản PyTorch CUDA tương ứng để đạt tốc độ cao nhất).*
 
 ---
 
-## 🚀 Hướng dẫn chạy chương trình
+## 🚀 Hướng Dẫn Sử Dụng
 
-### 1. Chạy Ứng Dụng Demo Giao Diện (Camera / Video)
+### 1. Chạy Ứng Dụng Giao Diện Trực Quan (GUI Desktop)
 
-Từ thư mục gốc dự án:
+Khởi chạy ứng dụng từ thư mục gốc:
 
 ```powershell
 python -m src.main
 ```
 
-- Bấm nút **`📁 Chọn video...`** để chọn video camera từ máy tính.
-- Video sẽ phát với tốc độ thực tế mượt mà, khung giao diện cố định.
-- Khi một trong 2 model phát hiện lửa đủ 5/10 lần gần nhất:
-  - Banner chuyển sang màu đỏ: `CẢNH BÁO: PHÁT HIỆN LỬA`.
-  - Console in dòng thông báo `🔥 CẢNH BÁO CHÁY!`.
-  - Ảnh chụp frame hiện tại được tự động lưu vào `canh_bao/`.
+- Bấm nút **`📁 Chọn video...`** để phát video hoặc kết nối nguồn camera RTSP.
+- Bảng điều khiển hiển thị trực tiếp: Bounding box có mã màu, Track ID, Điểm bằng chứng $E(t)$, Trạng thái đe dọa, Môi trường nhận diện và FPS thực tế.
+- Khi có nguy cơ cháy đạt ngưỡng `ALARM`:
+  - Banner chuyển sang màu đỏ: `CẢNH BÁO: PHÁT HIỆN LỬA` (hoặc `🔥 BÙNG LỬA`).
+  - Console in cảnh báo chi tiết kèm thời điểm video và timestamp hệ thống.
+  - Ảnh chụp kèm khung bounding box được tự động lưu vào thư mục `canh_bao/`.
 
-### 2. Kiểm Thử Độc Lập Trên Ảnh Tĩnh (`test_anh.py`)
+### 2. Chạy Kiểm Chuẩn Hồi Quy Trên Tập Ảnh (`scripts/regression_baseline.py`)
 
-Chạy script trên ảnh camera bất kỳ (ví dụ ảnh camera đêm bãi xe):
+Thực thi kiểm chuẩn độc lập trên toàn bộ ảnh trong thư mục `images/`:
 
 ```powershell
-# Chạy với ảnh mặc định:
-python test_anh.py
-
-# Hoặc truyền đường dẫn ảnh của bạn:
-python test_anh.py path/to/your/night_camera_image.jpg
+python scripts/regression_baseline.py
 ```
 
-Script sẽ:
-1. Chạy Model Cũ (`best.pt`) ở `conf=0.25`.
-2. Chạy Model Mới (`fire_yolo.pt`) ở 4 chế độ:
-   - [Cách 1] Ảnh gốc ở `conf=0.15`.
-   - [Cách 2] Hạ ngưỡng nhạy `conf=0.05`.
-   - [Cách 3] Chuyển ảnh sang Grayscale 3 kênh (chế độ hồng ngoại).
-   - [Cách 4] Tăng tương phản Gamma (`gamma=2.0`).
-3. Lưu toàn bộ ảnh có vẽ bounding box vào thư mục `runs_test/`.
+- Tự động xuất ảnh kết quả có vẽ box và thông số vào: `runs/regression_baseline/images/`
+- Tự động lưu bảng tổng hợp chỉ số phát hiện vào: `runs/regression_baseline/baseline_summary.json`
+- Ghi log frame-by-frame chi tiết vào: `runs/decision_log.jsonl`
+
+### 3. Đo Kiểm Chuẩn Hiệu Năng & Tốc Độ (`scripts/benchmark_performance.py`)
+
+So sánh thông lượng (FPS) và độ trễ giữa chế độ Full Ensemble và Adaptive Scheduling:
+
+```powershell
+python scripts/benchmark_performance.py
+```
+
+Báo cáo phân rã độ trễ (latency breakdown) chi tiết sẽ được xuất ra màn hình và lưu tại `runs/benchmark_performance.json`.
 
 ---
 
-## 🔧 Nơi cấu hình và điều chỉnh ngưỡng
+## 🔧 Cấu Hình & Tinh Chỉnh Tham Số
 
-Toàn bộ thông số được tập trung tại file [src/config.py](file:///d:/tecnix/fire-smoke-ai/src/config.py):
+Toàn bộ thông số hệ thống được tập trung tại [src/config.py](file:///d:/tecnix/fire-smoke-ai/src/config.py):
 
-| Tham số | Giá trị mặc định | Giải thích ý nghĩa |
+| Tham số | Giá trị | Ý nghĩa |
 | :--- | :--- | :--- |
-| `MODEL_MOI_CONF` | `0.15` | Ngưỡng confidence cho model mới `fire_yolo.pt` |
-| `MODEL_CU_CONF` | `0.25` | Ngưỡng confidence cho model cũ `best.pt` |
-| `TEN_LUA` | `{"fire", "flame", "lua", "chay"}` | Danh sách tên nhãn đồng nghĩa của lửa |
-| `TEN_KHOI` | `{"smoke", "khoi"}` | Danh sách tên nhãn đồng nghĩa của khói |
-| `DUNG_KHOI_DE_BAO` | `False` | Chỉ lửa kích hoạt báo động. Khói chỉ ghi log trừ khi đổi thành `True` |
-| `CHI_GOI_MODEL_CU_KHI_MODEL_MOI_KHONG_THAY` | `False` | Chạy OR song song. Nếu đặt `True`: chỉ gọi model cũ khi model mới không thấy lửa (tiết kiệm CPU) |
-| `DEQUE_WINDOW_SIZE` | `10` | Kích thước cửa sổ trượt bộ lọc thời gian (10 lần gần nhất) |
-| `MIN_FIRE_DETECTIONS_TO_ALERT` | `5` | Số lần tối thiểu cần thấy lửa trong 10 lần gần nhất để báo động |
-| `FRAME_STRIDE` | `3` | Tần suất xử lý AI: chỉ xử lý 1 trên N frame (mặc định 1/3) |
-| `COOLDOWN_CANH_BAO_SEC` | `30.0` | Thời gian chờ giữa 2 lần lưu ảnh cảnh báo (tránh spam) |
+| `ENSEMBLE_MODE` | `"both"` / `"tri"` / `"cascade"` | Chế độ phối hợp mô hình AI (chạy 2 model, 3 model, hoặc cascade) |
+| `WBF_IOU_THRESH` | `0.45` | Ngưỡng IoU ghép cặp trong Weighted Boxes Fusion |
+| `TAU_DECAY_FIRE` | `2.5` (giây) | Chu kỳ bán rã bằng chứng ngọn lửa |
+| `TAU_DECAY_SMOKE` | `8.0` (giây) | Chu kỳ bán rã bằng chứng làn khói |
+| `E_SUSPECT` | `25.0` | Ngưỡng tích lũy bước vào trạng thái nghi vấn (`SUSPECT`) |
+| `E_CONFIRMED` | `55.0` | Ngưỡng tích lũy xác nhận nguy cơ (`CONFIRMED`) |
+| `E_ALARM` | `85.0` | Ngưỡng kích hoạt báo động cháy chính thức (`ALARM`) |
+| `SOFT_PENALTY_STATIC` | `0.25` | Hệ số phạt bằng chứng đối với nguồn sáng tĩnh (đèn, biển báo) |
+| `SOFT_PENALTY_VEHICLE` | `0.10` | Hệ số phạt bằng chứng đối với đèn phương tiện giao thông chạy qua |
+| `EMERGENCY_GROWTH_RATIO` | `1.30` | Tỉ lệ nhảy vọt diện tích để kích hoạt bùng cháy khẩn cấp (`bung_lua`) |
+| `EMERGENCY_ROUGHNESS_THRESH` | `1.25` | Độ dao động viền hữu cơ tối thiểu để xác nhận ngọn lửa bập bùng |
+| `COOLDOWN_CANH_BAO_SEC` | `30.0` (giây) | Thời gian chờ giữa 2 lần lưu ảnh cảnh báo ra thư mục `canh_bao/` |
 
 ---
 
-## 🧪 Chạy kiểm thử tự động (Unit Tests)
+## 🧪 Kiểm Thử Tự Động Toàn Diện (Unit Tests)
+
+Khởi chạy bộ unit test tự động phủ khắp tất cả các module trong `tests/`:
 
 ```powershell
 python -m unittest discover tests
 ```
-*Đảm bảo 19/19 tests Passed.*
+
+**Đảm bảo toàn bộ 33/33 tests Passed (100% OK)** bao gồm:
+- Kiểm thử cấu hình, hình học letterbox và phân loại môi trường.
+- Kiểm thử logic WBF và phát hiện ban đêm/IR.
+- Kiểm thử toán học bộ tích lũy bằng chứng (khói yếu $C=0.20$ leo thang lên ALARM, triệt tiêu đèn tĩnh và đèn xe).
+- Kiểm thử Dynamic Stride, Adaptive Cascade và Hard Negative Curation kèm JSON metadata.

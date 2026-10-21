@@ -13,6 +13,7 @@ Loại bỏ các nguồn sáng cố định gây báo giả như đèn đường
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+import json
 import logging
 import time
 from typing import Dict, List, Optional, Tuple
@@ -39,7 +40,7 @@ from src.config import (
     STATIC_RELEASE_FLICKER_STD,
     is_fire,
 )
-from src.utils.video_utils import compute_iou
+from src.utils.geometry import compute_iou
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,11 @@ class LocNguonSangTinh:
         # Bộ nhớ nguồn sáng tĩnh tự học (Static Memory)
         self.static_memory: Dict[int, StaticMemoryItem] = {}
 
+        # Bản đồ nhiệt tự học nguồn sáng tĩnh (Persistent Brightness Heatmap)
+        self.heatmap: Optional[np.ndarray] = None
+        self.heatmap_shape: Tuple[int, int] = (135, 240)
+        self.heatmap_frame_count: int = 0
+
         # Quản lý lưu Hard Negatives
         self._last_hard_negative_save: float = 0.0
         self._hard_negative_count: int = 0
@@ -119,7 +125,48 @@ class LocNguonSangTinh:
         """Xóa toàn bộ lịch sử theo dõi (khi chuyển video hoặc mở stream mới)."""
         self.tracks.clear()
         self.static_memory.clear()
+        self.heatmap = None
+        self.heatmap_frame_count = 0
         self._next_track_id = 1
+
+    def update_heatmap(self, raw_frame_gray: np.ndarray) -> None:
+        """Tích lũy bản đồ nhiệt độ sáng tĩnh thời gian thực (Persistent Brightness Heatmap)."""
+        if raw_frame_gray is None or raw_frame_gray.size == 0:
+            return
+        try:
+            h_h, w_h = self.heatmap_shape
+            small = cv2.resize(raw_frame_gray, (w_h, h_h), interpolation=cv2.INTER_AREA)
+            sat_mask = (small >= 235).astype(np.float32)
+
+            if self.heatmap is None:
+                self.heatmap = sat_mask
+            else:
+                self.heatmap = 0.97 * self.heatmap + 0.03 * sat_mask
+            self.heatmap_frame_count += 1
+        except Exception:
+            pass
+
+    def is_persistent_hotspot(self, bbox: Tuple[int, int, int, int], frame_shape: Tuple[int, int]) -> bool:
+        """Kiểm tra một bounding box có nằm trúng điểm sáng tích lũy cố định trên bản đồ nhiệt hay không."""
+        if self.heatmap is None or self.heatmap_frame_count < 15:
+            return False
+        try:
+            fh, fw = frame_shape[:2]
+            hh, hw = self.heatmap_shape
+            x1, y1, x2, y2 = bbox
+
+            hx1 = max(0, min(hw - 1, int(x1 * hw / fw)))
+            hy1 = max(0, min(hh - 1, int(y1 * hh / fh)))
+            hx2 = max(0, min(hw, int(x2 * hw / fw)))
+            hy2 = max(0, min(hh, int(y2 * hh / fh)))
+
+            if hx2 <= hx1 or hy2 <= hy1:
+                return False
+
+            hotspot_crop = self.heatmap[hy1:hy2, hx1:hx2]
+            return bool(np.max(hotspot_crop) >= 0.35)
+        except Exception:
+            return False
 
     def _extract_crop_raw_gray(self, raw_frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
         """Crop vùng bbox trên ảnh xám GỐC (chưa qua CLAHE) để đo biến thiên thực sự."""
@@ -162,16 +209,23 @@ class LocNguonSangTinh:
         frame: np.ndarray,
         detections: List,  # List of Detection objects
         frame_index: int = 0,
-        timestamp_sec: Optional[float] = None
+        timestamp_sec: Optional[float] = None,
+        soft_filter: bool = False
     ) -> Tuple[List, List]:
         """
         Lọc danh sách detection:
-        - Sử dụng Static Memory để loại ngay các đèn tĩnh đã biết từ trước.
+        - Sử dụng Static Memory để nhận diện ngay các đèn tĩnh đã biết từ trước.
         - Theo dõi các box mới để xác nhận đèn tĩnh mới sau STATIC_CONFIRM_SEC.
         - Kiểm tra Safety Release để tự động mở lại cảnh báo nếu có cháy lan lớn.
+        - soft_filter=True: không loại bỏ hoàn toàn box mà gắn cờ det.is_static_suspect=True
+          và vẫn đưa vào valid_dets để bộ tích lũy bằng chứng xử lý phạt mềm.
         """
         use_time = (timestamp_sec is not None)
         now_time = float(timestamp_sec) if use_time else time.time()
+
+        if frame is not None and frame.size > 0:
+            frame_gray_mat = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+            self.update_heatmap(frame_gray_mat)
 
         if not detections:
             self._prune_dead_tracks(frame_index)
@@ -249,9 +303,10 @@ class LocNguonSangTinh:
                 det_to_track_map[d_idx] = tid
 
         # 3. Đánh giá tính tĩnh (static) cho từng track hiện tại
+        f_shape = frame.shape[:2] if (frame is not None and frame.size > 0) else None
         for tid in matched_track_ids:
             track = self.tracks[tid]
-            self._evaluate_static_nature(track, now_time, use_time=use_time)
+            self._evaluate_static_nature(track, now_time, use_time=use_time, frame_shape=f_shape)
 
         # 4. Phân loại detections thành hợp lệ hoặc bị loại bỏ
         valid_dets = []
@@ -297,13 +352,17 @@ class LocNguonSangTinh:
                     valid_dets.append(det)
                     continue
                 else:
-                    # Chặn ngay tức thì nhờ bộ nhớ tĩnh
+                    # Chặn hoặc phạt tĩnh nhờ bộ nhớ tĩnh
+                    det.is_static_suspect = True
                     static_dets.append(det)
-                    self._maybe_save_hard_negative(frame, det.bbox)
+                    self._maybe_save_hard_negative(frame, det.bbox, track=track, reason="static_memory")
+                    if soft_filter:
+                        valid_dets.append(det)
                     continue
 
             # (B) Kiểm tra trạng thái tĩnh hiện tại của track
             if track and track.is_static:
+                det.is_static_suspect = True
                 static_dets.append(det)
                 # Ghi nhớ vào bộ nhớ tĩnh để bảo vệ các frame sau
                 if tid not in self.static_memory:
@@ -325,7 +384,9 @@ class LocNguonSangTinh:
                 else:
                     self.static_memory[tid].last_seen_time = now_time
 
-                self._maybe_save_hard_negative(frame, det.bbox)
+                self._maybe_save_hard_negative(frame, det.bbox, track=track, reason="spatially_static_track")
+                if soft_filter:
+                    valid_dets.append(det)
             else:
                 valid_dets.append(det)
 
@@ -334,16 +395,38 @@ class LocNguonSangTinh:
 
         return valid_dets, static_dets
 
-    def _evaluate_static_nature(self, track: TrackedLightBox, current_time: float, use_time: bool = False) -> None:
-        """Đo đạc độ dịch chuyển tâm, độ biến thiên pixel và nhấp nháy."""
+    def _evaluate_static_nature(
+        self,
+        track: TrackedLightBox,
+        current_time: float,
+        use_time: bool = False,
+        frame_shape: Optional[Tuple[int, int]] = None
+    ) -> None:
+        """Đo đạc độ dịch chuyển tâm, độ biến thiên pixel, nhấp nháy và điểm sáng tích lũy."""
         num_frames = len(track.history_centers)
-        if num_frames < self.min_frames_xac_nhan:
+
+        # Kiểm tra điểm sáng tích lũy cố định trên bản đồ nhiệt (Auto Heatmap)
+        is_hotspot = False
+        if frame_shape is not None:
+            is_hotspot = self.is_persistent_hotspot(track.bbox, frame_shape)
+
+        if is_hotspot and track.core_saturation_ratio >= 0.25:
+            req_frames = 3
+            req_sec = 0.3
+        elif track.core_saturation_ratio >= 0.40:
+            req_frames = 4
+            req_sec = 0.4
+        else:
+            req_frames = self.min_frames_xac_nhan
+            req_sec = self.static_confirm_sec
+
+        if num_frames < req_frames:
             track.is_static = False
             return
 
         if use_time:
             time_elapsed = current_time - track.first_seen_time
-            if time_elapsed < self.static_confirm_sec:
+            if time_elapsed < req_sec:
                 track.is_static = False
                 return
 
@@ -356,7 +439,7 @@ class LocNguonSangTinh:
 
         # 2. Tính độ biến thiên nội dung pixel trên ảnh GỐC (Raw Content Motion)
         crops = list(track.history_crops)
-        if len(crops) >= self.min_frames_xac_nhan:
+        if len(crops) >= req_frames:
             diffs = [
                 float(np.mean(np.abs(crops[i].astype(np.float32) - crops[i - 1].astype(np.float32))))
                 for i in range(1, len(crops))
@@ -377,17 +460,27 @@ class LocNguonSangTinh:
         # - Ánh sáng ít nhấp nháy (flicker_std < FLICKER_STD_MAX)
         # - Hoặc có lõi bão hòa trắng >= 240 rõ nét của bóng đèn
         is_spatially_static = (pos_drift < self.nguong_dich)
-        is_motion_static = (motion_score < self.nguong_dong)
+        # Cho phép ngưỡng động thích ứng tới 18.0 khi camera có rung lắc vi mô hoặc nhiễu nén
+        effective_nguong_dong = max(self.nguong_dong, 18.0) if pos_drift < 4.0 else self.nguong_dong
+        is_motion_static = (motion_score < effective_nguong_dong)
         is_flicker_static = (flicker_std < FLICKER_STD_MAX)
         has_bulb_saturation = (track.core_saturation_ratio >= SATURATION_RATIO_MIN)
 
-        if is_spatially_static and is_motion_static and (is_flicker_static or has_bulb_saturation):
+        if is_spatially_static and has_bulb_saturation and (pos_drift < 3.0 or is_motion_static):
+            track.is_static = True
+        elif is_spatially_static and is_motion_static and (is_flicker_static or has_bulb_saturation):
             track.is_static = True
         else:
             track.is_static = False
 
-    def _maybe_save_hard_negative(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> None:
-        """Tự động lưu ảnh hard negative khi phát hiện đèn tĩnh (nếu bật cờ SAVE_HARD_NEGATIVES)."""
+    def _maybe_save_hard_negative(
+        self,
+        frame: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+        track: Optional[TrackedLightBox] = None,
+        reason: str = "static_light"
+    ) -> None:
+        """Tự động lưu ảnh full frame, crop và file metadata JSON khi phát hiện đèn tĩnh (Active Learning)."""
         if not SAVE_HARD_NEGATIVES:
             return
         now = time.time()
@@ -399,11 +492,39 @@ class LocNguonSangTinh:
         try:
             HARD_NEGATIVES_DIR.mkdir(parents=True, exist_ok=True)
             ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = HARD_NEGATIVES_DIR / f"hard_neg_{ts_str}_{self._hard_negative_count}.jpg"
-            cv2.imwrite(str(save_path), frame)
+            prefix = f"hard_neg_{ts_str}_{self._hard_negative_count}"
+
+            # 1. Lưu full frame
+            full_path = HARD_NEGATIVES_DIR / f"{prefix}_full.jpg"
+            cv2.imwrite(str(full_path), frame)
+
+            # 2. Cắt và lưu vùng crop
+            x1, y1, x2, y2 = bbox
+            h, w = frame.shape[:2]
+            crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+            if crop.size > 0:
+                crop_path = HARD_NEGATIVES_DIR / f"{prefix}_crop.jpg"
+                cv2.imwrite(str(crop_path), crop)
+
+            # 3. Lưu metadata JSON
+            meta = {
+                "timestamp": now,
+                "datetime": ts_str,
+                "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                "reason": reason,
+                "track_id": track.track_id if track else -1,
+                "last_drift": round(track.last_drift, 3) if track else 0.0,
+                "last_motion": round(track.last_motion, 3) if track else 0.0,
+                "flicker_std": round(track.flicker_std, 3) if track else 0.0,
+                "core_sat_ratio": round(track.core_saturation_ratio, 3) if track else 0.0
+            }
+            meta_path = HARD_NEGATIVES_DIR / f"{prefix}_meta.json"
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+
             self._last_hard_negative_save = now
             self._hard_negative_count += 1
-            logger.info(f"[HardNegative] Đã lưu mẫu âm tính vào: {save_path.name}")
+            logger.info(f"[HardNegative] Đã lưu mẫu âm tính kèm metadata vào: {prefix}")
         except Exception as e:
             logger.debug(f"Lỗi khi lưu hard negative: {e}")
 
@@ -424,3 +545,15 @@ class LocNguonSangTinh:
         ]
         for tid in expired_tids:
             del self.static_memory[tid]
+
+    def unlock_region(self, bbox: Tuple[int, int, int, int], cx: float, cy: float, w: float) -> None:
+        """Mở khóa an toàn một vùng nghi vấn khi phát hiện bùng lửa."""
+        for mem_tid, mem_item in list(self.static_memory.items()):
+            if compute_iou(bbox, mem_item.bbox) >= 0.20 or np.hypot(
+                cx - (mem_item.bbox[0] + mem_item.bbox[2]) / 2.0,
+                cy - (mem_item.bbox[1] + mem_item.bbox[3]) / 2.0
+            ) < 1.5 * w:
+                self.static_memory.pop(mem_tid, None)
+        for tid, trk in list(self.tracks.items()):
+            if compute_iou(bbox, trk.bbox) >= 0.20:
+                trk.is_static = False

@@ -252,7 +252,7 @@ def simulate_new_fusion(
             continue
 
         if LOC_DANG_NGUOI_DI_DUONG and is_fire(cname):
-            if det.n_votes == 1 and ar >= MAX_ASPECT_RATIO_LUA and det.confidence < 0.45:
+            if det.n_votes == 1 and ar >= MAX_ASPECT_RATIO_LUA and det.confidence < 0.35:
                 continue
 
         if is_night and CHE_DO_DEM_TU_DONG and det.n_votes == 1:

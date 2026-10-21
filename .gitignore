@@ -12,6 +12,8 @@ ENV/
 # Output directories & inference runs
 runs/
 *.log
+canh_bao/
+
 
 # Large model weights (keep models directory tracked with .gitkeep if needed)
 !models/.gitkeep
